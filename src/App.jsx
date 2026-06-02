@@ -1320,6 +1320,7 @@ export default function App() {
   // オンラインモード：Firebase同期
   // ============================================================
   const room = useRoom();
+  const calculatedForRef = useRef(null); // 同じQを2回計算しないためのガード
 
   // オンラインモード：roomDataの変化を監視してゲーム状態を同期
   useEffect(() => {
@@ -1365,9 +1366,14 @@ export default function App() {
     const playerList = Object.values(players);
     if (playerList.length < 2) return;
 
-    // 全員がreadyかチェック
+    // ★ 全員がreadyの時だけ計算する（1人でもfalseがいたら何もしない）
     const allReady = playerList.every(p => p.ready === true);
     if (!allReady) return;
+
+    // ★ 同じQを2回計算しないためのガード
+    const currentQ = room.roomData.quarter || 1;
+    if (calculatedForRef.current === currentQ) return;
+    calculatedForRef.current = currentQ;
 
     const market = MARKETS[marketId];
     if (!market || !room.roomData.gameState) return;
@@ -1462,7 +1468,6 @@ export default function App() {
       quarterLogs[pid] = { pl, event: null, narratives: [] };
     });
 
-    const currentQ = room.roomData.quarter || 1;
     const nextQ = currentQ + 1;
     const nextStatus = currentQ % 4 === 0 ? "yearreview"
                      : nextQ > MAX_QUARTERS ? "gameover"
