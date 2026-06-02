@@ -1358,31 +1358,35 @@ export default function App() {
 
   // オンラインモード：全員準備完了時にホストが計算実行
   useEffect(() => {
-    if (!onlineMode || !room.isHost || !room.allReady || !room.roomData) return;
+    if (!onlineMode || !room.isHost || !room.roomData) return;
     if (room.roomData.status !== "playing") return;
 
-    // 全プレイヤーの配分を取得してQ計算
-    const players = room.roomData.players;
+    const players = room.roomData.players || {};
+    const playerList = Object.values(players);
+    if (playerList.length < 2) return;
+
+    // 全員がreadyかチェック
+    const allReady = playerList.every(p => p.ready === true);
+    if (!allReady) return;
+
     const market = MARKETS[marketId];
     if (!market || !room.roomData.gameState) return;
 
     const playerEntries = Object.entries(players);
     const gameStates = room.roomData.gameState;
 
-    // 各プレイヤーのopsを取得して競争計算
+    // 競争計算
     const allPlayerOps = playerEntries.map(([pid, p]) => ({
       id: pid,
       ops: gameStates[pid]?.ops || {},
     }));
+    const competResults = resolveMarket(allPlayerOps, market, room.roomData.quarter || 1);
 
-    // 競争解決
-    const competResults = resolveMarket(allPlayerOps, market, room.roomData.quarter);
-
-    // 各プレイヤーのPL計算
+    // 各プレイヤーのQ処理
     const newGameState = {};
     const quarterLogs = {};
 
-    playerEntries.forEach(([pid, p], idx) => {
+    playerEntries.forEach(([pid, p]) => {
       const pState = gameStates[pid];
       if (!pState) return;
       const alloc = p.allocation || {sales:0,dev:0,marketing:0,price:0,cs:0};
@@ -1391,44 +1395,81 @@ export default function App() {
       const eff = pt?.investEfficiency || 1.0;
       const baseOpex = pt?.baseOpex || 100;
 
+      // パラメータ更新
       let pOps = applyBudgetAllocation(pState.ops, alloc, eff);
       let pBs = {...pState.bs};
-      let sgaAdd = 0;
+      let sgaAdd = 0, capitalizeAmt = 0;
 
-      if (special && !pState.usedSpecials?.includes(special)) {
+      // 特別アクション
+      if (special && SPECIAL_ACTIONS[special] && !pState.usedSpecials?.includes(special)) {
         const r = applySpecialAction(pBs, pOps, special, pState.usedSpecials || []);
-        pBs = r.bs; pOps = r.ops; sgaAdd = r.sgaAdd;
+        pBs = r.bs; pOps = r.ops; sgaAdd = r.sgaAdd || 0; capitalizeAmt = r.capitalizeAmt || 0;
       }
 
+      // 競争結果適用
       const cr = competResults.find(r => r.id === pid);
       if (!cr) return;
+      const finalOps = {...pOps, stores: cr.finalStores};
 
-      const { newBs, newOps, pl } = finalizePL(pBs, pOps, market, sgaAdd, cr, eff, ACTIONS[special]?.name || "");
+      // PL計算
+      const dep = Math.floor(pBs.softwareAsset * SW_DEP_RATE);
+      pBs.softwareAsset -= dep;
+      const interest = Math.floor(pBs.debt * INTEREST_RATE);
+
+      let allocSga = 0, allocCap = 0;
+      BUDGET_ITEMS.forEach(item => {
+        const amt = alloc[item.id] || 0;
+        if (amt > 0) { if (item.capitalize) allocCap += amt; else allocSga += amt; }
+      });
+      pBs.softwareAsset += allocCap;
+
+      const revenue = calcRevenue(finalOps, market);
+      const cogs = Math.floor(revenue * 0.25);
+      const varCost = calcVarCost(finalOps, market);
+      const totalSga = allocSga + sgaAdd + baseOpex + varCost;
+      const operatingProfit = revenue - cogs - totalSga - dep;
+      const netIncome = operatingProfit - interest;
+
+      pBs.cash += revenue - cogs - varCost - baseOpex - allocSga - sgaAdd - allocCap - interest;
+      pBs.retainedEarnings += netIncome;
 
       const newUsed = special && SPECIAL_ACTIONS[special]?.oneTime
         ? [...(pState.usedSpecials||[]), special]
         : (pState.usedSpecials||[]);
 
       newGameState[pid] = {
-        bs: newBs,
-        ops: newOps,
-        usedSpecials: newUsed,
+        bs: pBs, ops: finalOps, usedSpecials: newUsed,
         allocation: {sales:0,dev:0,marketing:0,price:0,cs:0},
         specialAction: null,
-        lastNetIncome: pl.netIncome,
+        lastNetIncome: netIncome,
         permanentOpexExtra: pState.permanentOpexExtra || 0,
       };
 
+      const pl = {
+        revenue, cogs, grossProfit: revenue-cogs, varCost,
+        allocSga, allocCap, sgaAdd, opex: baseOpex, totalSga,
+        depAmt: dep, interestExpense: interest,
+        operatingProfit, netIncome,
+        competResult: {
+          newFromUnclaimed: cr.newFromUnclaimed || 0,
+          stolenFromRivals: cr.stolenFromRivals || 0,
+          naturalChurn: cr.naturalChurn || 0,
+          lostToRivals: cr.lostToRivals || 0,
+          finalStores: cr.finalStores,
+        },
+        playerAlloc: alloc, playerSpecial: special,
+      };
       quarterLogs[pid] = { pl, event: null, narratives: [] };
     });
 
-    const nextQ = (room.roomData.quarter || 1) + 1;
-    const nextStatus = room.roomData.quarter % 4 === 0 ? "yearreview"
+    const currentQ = room.roomData.quarter || 1;
+    const nextQ = currentQ + 1;
+    const nextStatus = currentQ % 4 === 0 ? "yearreview"
                      : nextQ > MAX_QUARTERS ? "gameover"
                      : "result";
 
     room.writeQuarterResult(nextQ, newGameState, quarterLogs, nextStatus);
-  }, [room.allReady, onlineMode]);
+  }, [room.roomData, onlineMode]);
 
   // オンライン：配分提出
   const onlineSubmitAllocation = async () => {
