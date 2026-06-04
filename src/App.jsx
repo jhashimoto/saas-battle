@@ -11,12 +11,15 @@ import { useRoom } from "./useRoom.js";
 const MARKETS = {
   food:   { id:"food",   name:"飲食 モバイルオーダー", icon:"🍜", color:"#FF6B35",
             arpu:80,  totalStores:800, varCostPerStore:0.5, entryDiff:1,
+            priceSensitivity:0.60,
             desc:"参入しやすく競合が激しい。シェアを早く取れるかが勝負。" },
   retail: { id:"retail", name:"小売店 会員証",        icon:"🏪", color:"#06B6D4",
             arpu:140, totalStores:400, varCostPerStore:0.8, entryDiff:3,
+            priceSensitivity:0.50,
             desc:"導入ハードルが高い。大手獲得で一気に優位に立てる。" },
   beauty: { id:"beauty", name:"美容室 予約サービス",  icon:"✂️", color:"#A855F7",
             arpu:200, totalStores:300, varCostPerStore:1.2, entryDiff:2,
+            priceSensitivity:0.75,
             desc:"競合が少なくARPUが高い。品質で差をつけるか価格で攻めるか。" },
 };
 
@@ -43,14 +46,14 @@ const PLAYER_TYPES = {
     id:"vendor", name:"既存SaaSベンダー", icon:"🏢",
     desc:"営業網と資金力が強み。ただし組織が重く固定費が高い。",
     bs:  { cash:2000, softwareAsset:0, otherAsset:500, debt:0, capital:2500, retainedEarnings:0 },
-    ops: { solutionQuality:40, salesPower:60, brandAwareness:55, priceCompetitiveness:45, supportQuality:50, stores:0 },
+    ops: { solutionQuality:40, salesPower:60, brandAwareness:55, priceCompetitiveness:45, supportQuality:50, stores:0, setPrice:0, priceMultiplier:1.0 },
     investRatio: 0.10, baseOpex: 200, investEfficiency: 1.0,
   },
   startup: {
     id:"startup", name:"スタートアップ", icon:"🚀",
     desc:"少ない予算でも投資効率1.8倍。集中投資で特定パラメータを一気に伸ばせる。",
     bs:  { cash:400, softwareAsset:0, otherAsset:50, debt:0, capital:450, retainedEarnings:0 },
-    ops: { solutionQuality:55, salesPower:20, brandAwareness:20, priceCompetitiveness:60, supportQuality:35, stores:0 },
+    ops: { solutionQuality:55, salesPower:20, brandAwareness:20, priceCompetitiveness:60, supportQuality:35, stores:0, setPrice:0, priceMultiplier:1.0 },
     investRatio: 0.12, baseOpex: 40, investEfficiency: 1.8,
   },
 };
@@ -81,16 +84,16 @@ const BUDGET_ITEMS = [
     param:"salesPower",          basePer100:0.8, decay:0.8, capitalize:false,
     desc:"salesPower上昇（逓減あり）。未投資で毎Q-0.8。" },
   { id:"dev",      name:"プロダクト開発", icon:"⚙️", color:"#A855F7",
-    param:"solutionQuality",     basePer100:1.0, decay:0.6, capitalize:true,
+    param:"solutionQuality",     basePer100:0.8, decay:0.6, capitalize:true,
     desc:"solutionQuality上昇（逓減あり）。未投資で毎Q-0.6。資産計上。" },
   { id:"marketing",name:"マーケ",         icon:"📢", color:"#E3B341",
-    param:"brandAwareness",      basePer100:1.2, decay:1.0, capitalize:false,
+    param:"brandAwareness",      basePer100:1.0, decay:1.0, capitalize:false,
     desc:"brandAwareness上昇（逓減あり）。未投資で毎Q-1.0。" },
   { id:"price",    name:"価格競争力",     icon:"💴", color:"#3FB950",
-    param:"priceCompetitiveness",basePer100:1.2, decay:0.4, capitalize:false,
+    param:"priceCompetitiveness",basePer100:1.0, decay:0.4, capitalize:false,
     desc:"priceCompetitiveness上昇（逓減あり）。未投資で毎Q-0.4。" },
   { id:"cs",       name:"CS・サポート",   icon:"🎧", color:"#FFA657",
-    param:"supportQuality",      basePer100:1.0, decay:0.8, capitalize:false,
+    param:"supportQuality",      basePer100:0.9, decay:0.8, capitalize:false,
     desc:"supportQuality上昇（逓減あり）。未投資で毎Q-0.8。" },
 ];
 
@@ -263,14 +266,31 @@ function competitiveScore(ops) {
 
 function calcChurn(ops) {
   const base = 0.12;
-  return Math.max(0.01, Math.min(0.35,
-    base - (ops.supportQuality - 50) * 0.005 - (ops.solutionQuality - 50) * 0.003));
+  return Math.max(0.02, Math.min(0.35,
+    base - (ops.supportQuality - 50) * 0.004 - (ops.solutionQuality - 50) * 0.001));
 }
 
 function calcRevenue(ops, market) {
-  return Math.floor(ops.stores * market.arpu
-    * (1 + (ops.solutionQuality - 50) * 0.005)
-    * (1 + (ops.priceCompetitiveness - 50) * 0.002));
+  // ARPUはpriceMultiplier（価格設定）で変動。solutionQualityはスコア経由のみ
+  const priceMultiplier = ops.priceMultiplier || 1.0;
+  return Math.floor(ops.stores * market.arpu * priceMultiplier);
+}
+
+// 価格設定からpriceMultiplierとcompetitiveness補正を計算
+// basePrice = market.arpu（標準価格）
+// 低価格 → シェア獲得ボーナス、ARPU減少
+// 高価格 → ARPU増加、シェア獲得ペナルティ
+function calcPriceMultiplier(setPrice, baseArpu) {
+  if (!setPrice || setPrice <= 0) return 1.0;
+  return setPrice / baseArpu;
+}
+
+// 価格競争力スコア（設定価格が安いほど高い）
+function calcPriceCompetitiveness(setPrice, baseArpu) {
+  if (!setPrice || setPrice <= 0) return 50;
+  const ratio = setPrice / baseArpu; // 1.0 = 標準
+  // ratio 0.7 → score 80, ratio 1.0 → score 50, ratio 1.3 → score 20
+  return Math.max(0, Math.min(PARAM_MAX, Math.round(50 - (ratio - 1.0) * 100)));
 }
 
 function calcVarCost(ops, market) {
@@ -327,30 +347,41 @@ function resolveMarket(allPlayers, market, quarter, extraUnclaimed = 0) {
     const myScore = scores[i];
     const myShare = totalScore > 0 ? myScore / totalScore : 1 / allPlayers.length;
 
-    // 未獲得市場の獲得（シェア比例のみ。salesPowerはスコア経由で効く）
     const rawNewFromUnclaimed = Math.floor(unclaimed * myShare * 0.15 * phase.growthBonus);
-    // 最低1店保証（スコアがある限りゼロ獲得は起きない）
     const newFromUnclaimed = unclaimed > 0 ? Math.max(1, rawNewFromUnclaimed) : 0;
 
-    // 競合からの奪取（成熟期は激化）
+    // 競合からの奪取（スコア差 + 価格差ボーナス）
     let stolenFromRivals = 0;
     allPlayers.forEach((rival, j) => {
       if (i === j || rival.ops.stores === 0) return;
       const diff = myScore - scores[j];
       if (diff > 0) {
-        // スコア差が大きいほど奪取率が高い。成熟期は最大20%/Q
-        const rate = Math.min(0.20, (diff / Math.max(scores[j], 1)) * 0.25 * phase.stealMultiplier);
+        let rate = Math.min(0.20, (diff / Math.max(scores[j], 1)) * 0.25 * phase.stealMultiplier);
+        // ★ 自分が安く相手が高い場合：価格差に応じて追加奪取
+        const myPrice = player.ops.setPrice || market.arpu;
+        const rivalPrice = rival.ops.setPrice || market.arpu;
+        if (myPrice < rivalPrice) {
+          const priceDiffRatio = (rivalPrice - myPrice) / rivalPrice;
+          rate = Math.min(0.30, rate + priceDiffRatio * (market.priceSensitivity || 0.6) * 0.4);
+        }
         stolenFromRivals += Math.floor(rival.ops.stores * rate);
       }
     });
 
-    // 競合に奪われる
+    // 競合に奪われる（スコア差 + 価格差ペナルティ）
     let lostToRivals = 0;
     allPlayers.forEach((rival, j) => {
       if (i === j || player.ops.stores === 0) return;
       const diff = scores[j] - myScore;
       if (diff > 0) {
-        const rate = Math.min(0.20, (diff / Math.max(myScore, 1)) * 0.25 * phase.stealMultiplier);
+        let rate = Math.min(0.20, (diff / Math.max(myScore, 1)) * 0.25 * phase.stealMultiplier);
+        // ★ 自分が高く相手が安い場合：価格差に応じて追加流出
+        const myPrice = player.ops.setPrice || market.arpu;
+        const rivalPrice = rival.ops.setPrice || market.arpu;
+        if (myPrice > rivalPrice) {
+          const priceDiffRatio = (myPrice - rivalPrice) / myPrice;
+          rate = Math.min(0.30, rate + priceDiffRatio * (market.priceSensitivity || 0.6) * 0.4);
+        }
         lostToRivals += Math.floor(player.ops.stores * rate);
       }
     });
@@ -930,7 +961,7 @@ function PLTable({pl}) {
 // ============================================================
 // ONLINE LOBBY
 // ============================================================
-function OnlineLobby({ onSolo, room }) {
+function OnlineLobby({ onSolo, onTutorial, room }) {
   const { roomCode, roomData, playerId, isHost, error, loading, allReady,
           createRoom, joinRoom, startGame, players } = room;
 
@@ -992,6 +1023,9 @@ function OnlineLobby({ onSolo, room }) {
           </button>
           <button onClick={onSolo} style={{background:C.bg,color:C.muted,border:`1px solid ${C.border}`,borderRadius:12,padding:"14px 0",fontSize:14,cursor:"pointer"}}>
             👤 ソロプレイ（NPC対戦）
+          </button>
+          <button onClick={onTutorial} style={{background:"none",color:C.muted,border:"none",padding:"8px 0",fontSize:12,cursor:"pointer"}}>
+            📖 チュートリアルを見る
           </button>
         </div>
       </div>
@@ -1138,8 +1172,374 @@ function OnlineLobby({ onSolo, room }) {
 }
 
 // ============================================================
-// SETUP SCREENS
+// TUTORIAL SCREEN（5スライド）
 // ============================================================
+function TutorialScreen({ onComplete }) {
+  const [slide, setSlide] = useState(0);
+  const total = 5;
+
+  const slides = [
+    // ===== スライド1：このゲームは何？ =====
+    {
+      title: "LINEミニアプリ市場で戦え",
+      subtitle: "SaaS Market Battle",
+      content: (
+        <div>
+          <div style={{textAlign:"center",marginBottom:20}}>
+            {/* 市場イメージ：3つの業種アイコン */}
+            <div style={{display:"flex",justifyContent:"center",gap:16,marginBottom:16}}>
+              {[["🍜","飲食"],["🏪","小売"],["✂️","美容室"]].map(([icon,label])=>(
+                <div key={label} style={{background:C.panel,borderRadius:12,padding:"16px 20px",textAlign:"center",border:`1px solid ${C.border}`}}>
+                  <div style={{fontSize:36}}>{icon}</div>
+                  <div style={{fontSize:11,color:C.muted,marginTop:6}}>{label}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div style={{display:"grid",gap:10}}>
+            <div style={{display:"flex",gap:12,alignItems:"flex-start",background:C.panel,borderRadius:10,padding:"12px 14px"}}>
+              <span style={{fontSize:22,flexShrink:0}}>🏢</span>
+              <div>
+                <div style={{fontSize:13,fontWeight:700,color:C.text,marginBottom:2}}>あなたはSaaSベンダー</div>
+                <div style={{fontSize:12,color:C.muted}}>飲食・小売・美容室向けのLINEミニアプリを提供する事業者として市場に参入する</div>
+              </div>
+            </div>
+            <div style={{display:"flex",gap:12,alignItems:"flex-start",background:C.panel,borderRadius:10,padding:"12px 14px"}}>
+              <span style={{fontSize:22,flexShrink:0}}>⚔️</span>
+              <div>
+                <div style={{fontSize:13,fontWeight:700,color:C.text,marginBottom:2}}>競合と店舗を奪い合う</div>
+                <div style={{fontSize:12,color:C.muted}}>同じ市場に2〜3社のライバルが存在。毎四半期、投資戦略と価格で競争する</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ),
+    },
+
+    // ===== スライド2：勝利条件 =====
+    {
+      title: "勝つのは誰だ？",
+      subtitle: "3年後の総資産で決まる",
+      content: (
+        <div>
+          {/* 時系列イメージ */}
+          <div style={{marginBottom:20}}>
+            <div style={{display:"flex",alignItems:"center",gap:0,marginBottom:16}}>
+              {[["🌅","Year 1\n黎明期","先行者を\n取れるかが勝負","#E3B341"],
+                ["🚀","Year 2\n急成長","投資を\n加速せよ","#3FB950"],
+                ["🏁","Year 3\n成熟期","奪い合いが\n激化する","#D2A8FF"]].map(([icon,label,desc,color],i)=>(
+                <div key={i} style={{flex:1,textAlign:"center"}}>
+                  <div style={{background:`${color}22`,border:`1px solid ${color}55`,borderRadius:10,padding:"12px 6px"}}>
+                    <div style={{fontSize:28}}>{icon}</div>
+                    <div style={{fontSize:11,fontWeight:700,color,marginTop:4,whiteSpace:"pre-line"}}>{label}</div>
+                    <div style={{fontSize:10,color:C.muted,marginTop:4,whiteSpace:"pre-line"}}>{desc}</div>
+                  </div>
+                  {i<2&&<div style={{fontSize:18,color:C.muted}}>→</div>}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* 勝利条件 */}
+          <div style={{background:`${C.cyan}15`,border:`1px solid ${C.cyan}44`,borderRadius:12,padding:"16px",textAlign:"center"}}>
+            <div style={{fontSize:14,color:C.muted,marginBottom:6}}>勝利条件</div>
+            <div style={{fontSize:22,fontWeight:900,color:C.cyan}}>12Q終了時の</div>
+            <div style={{fontSize:22,fontWeight:900,color:C.cyan}}>総資産（現金＋資産）最大</div>
+            <div style={{fontSize:11,color:C.muted,marginTop:8}}>店舗を増やして売上を積み上げ、賢く投資して資産を作れ</div>
+          </div>
+        </div>
+      ),
+    },
+
+    // ===== スライド3：毎Qの流れ =====
+    {
+      title: "1四半期の流れ",
+      subtitle: "これを12回繰り返す",
+      content: (
+        <div>
+          <div style={{display:"grid",gap:8}}>
+            {[
+              {step:"01", icon:"💰", color:C.cyan,   title:"予算を配分する",
+               desc:"今期の投資可能額を5つの項目に自由に配分。残しても次Qに繰り越せる。"},
+              {step:"02", icon:"⚡", color:C.yellow,  title:"特別アクション（任意）",
+               desc:"大手との契約・広報PR・資金調達など1Q1回の特別手を打てる。"},
+              {step:"03", icon:"▶️", color:C.green,   title:"四半期を進める",
+               desc:"全員の配分が決まったら実行。競争が解決され結果が出る。"},
+              {step:"04", icon:"📊", color:C.purple,  title:"決算・競争結果を確認",
+               desc:"PL/BSと競合との比較を確認。次Qの戦略を立てる。"},
+            ].map(s=>(
+              <div key={s.step} style={{display:"flex",gap:12,alignItems:"center",background:C.panel,borderRadius:10,padding:"10px 14px",border:`1px solid ${s.color}33`}}>
+                <div style={{width:28,height:28,borderRadius:"50%",background:`${s.color}33`,border:`1px solid ${s.color}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:900,color:s.color,flexShrink:0}}>
+                  {s.step}
+                </div>
+                <span style={{fontSize:20,flexShrink:0}}>{s.icon}</span>
+                <div>
+                  <div style={{fontSize:13,fontWeight:700,color:C.text}}>{s.title}</div>
+                  <div style={{fontSize:11,color:C.muted}}>{s.desc}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ),
+    },
+
+    // ===== スライド4：5つのパラメータ =====
+    {
+      title: "5つの競争力",
+      subtitle: "投資しないと毎Q劣化する",
+      content: (
+        <div>
+          <div style={{display:"grid",gap:8,marginBottom:14}}>
+            {[
+              {icon:"👥",name:"営業力",      color:"#06B6D4",desc:"新規獲得ペースに直結",bar:70},
+              {icon:"⚙️",name:"プロダクト品質",color:"#A855F7",desc:"解約率を下げる・競争スコアに寄与",bar:55},
+              {icon:"📢",name:"ブランド認知", color:"#E3B341",desc:"シェア獲得を加速。未投資で最も劣化",bar:40},
+              {icon:"💴",name:"価格競争力",   color:"#3FB950",desc:"低価格ほど高い。年次価格設定でも変動",bar:60},
+              {icon:"🎧",name:"CS品質",       color:"#FFA657",desc:"解約率を下げる。長期保有に重要",bar:50},
+            ].map(p=>(
+              <div key={p.name} style={{display:"flex",gap:10,alignItems:"center",background:C.panel,borderRadius:8,padding:"8px 12px"}}>
+                <span style={{fontSize:18,flexShrink:0}}>{p.icon}</span>
+                <div style={{flex:1}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                    <span style={{fontSize:12,fontWeight:700,color:p.color}}>{p.name}</span>
+                    <span style={{fontSize:10,color:C.muted}}>{p.desc}</span>
+                  </div>
+                  <div style={{background:C.border,borderRadius:3,height:5,overflow:"hidden"}}>
+                    <div style={{width:`${p.bar}%`,height:"100%",background:p.color,borderRadius:3}}/>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{background:`${C.red}15`,border:`1px solid ${C.red}44`,borderRadius:8,padding:"10px 12px",fontSize:11,color:C.red,textAlign:"center"}}>
+            ⚠️ 投資しなかった項目は毎Q自動で劣化します。全部は維持できない
+          </div>
+        </div>
+      ),
+    },
+
+    // ===== スライド5：価格戦略 =====
+    {
+      title: "価格が勝敗を分ける",
+      subtitle: "年1回だけ設定できる",
+      content: (
+        <div>
+          {/* 価格スペクトラム */}
+          <div style={{background:C.panel,borderRadius:12,padding:"16px",marginBottom:14}}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
+              <div style={{textAlign:"center"}}>
+                <div style={{fontSize:24}}>📉</div>
+                <div style={{fontSize:11,fontWeight:700,color:C.green}}>低価格</div>
+              </div>
+              <div style={{textAlign:"center"}}>
+                <div style={{fontSize:24}}>⚖️</div>
+                <div style={{fontSize:11,fontWeight:700,color:C.cyan}}>標準</div>
+              </div>
+              <div style={{textAlign:"center"}}>
+                <div style={{fontSize:24}}>💎</div>
+                <div style={{fontSize:11,fontWeight:700,color:C.yellow}}>高価格</div>
+              </div>
+            </div>
+            <div style={{background:`linear-gradient(to right, ${C.green}, ${C.cyan}, ${C.yellow})`,height:6,borderRadius:3,marginBottom:10}}/>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,fontSize:10,color:C.muted,textAlign:"center"}}>
+              <div>シェア獲得⬆<br/>ARPU⬇</div>
+              <div>バランス型</div>
+              <div>ARPU⬆<br/>解約リスク⬆</div>
+            </div>
+          </div>
+
+          <div style={{display:"grid",gap:8}}>
+            <div style={{display:"flex",gap:10,background:C.panel,borderRadius:8,padding:"10px 12px",border:`1px solid ${C.red}44`}}>
+              <span style={{fontSize:20}}>⚠️</span>
+              <div>
+                <div style={{fontSize:12,fontWeight:700,color:C.red,marginBottom:2}}>値上げすると即時解約が発生</div>
+                <div style={{fontSize:11,color:C.muted}}>値上げ幅 × 市場感度 × 保有店舗数 = 解約店舗数</div>
+              </div>
+            </div>
+            <div style={{display:"flex",gap:10,background:C.panel,borderRadius:8,padding:"10px 12px",border:`1px solid ${C.cyan}44`}}>
+              <span style={{fontSize:20}}>💡</span>
+              <div>
+                <div style={{fontSize:12,fontWeight:700,color:C.cyan,marginBottom:2}}>対人戦の核心</div>
+                <div style={{fontSize:11,color:C.muted}}>相手が低価格のときに自分が値上げすると店舗を根こそぎ奪われる</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ),
+    },
+  ];
+
+  const s = slides[slide];
+
+  return (
+    <div style={bgBase}>
+      <div style={{maxWidth:560,margin:"0 auto",padding:"32px 20px",minHeight:"100vh",display:"flex",flexDirection:"column"}}>
+        {/* ヘッダー */}
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:24}}>
+          <div style={{fontSize:11,color:C.muted,letterSpacing:2}}>TUTORIAL</div>
+          <button onClick={onComplete} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:12}}>
+            スキップ →
+          </button>
+        </div>
+
+        {/* プログレスバー */}
+        <div style={{display:"flex",gap:4,marginBottom:28}}>
+          {Array.from({length:total}).map((_,i)=>(
+            <div key={i} style={{flex:1,height:3,borderRadius:2,
+              background:i<=slide?C.cyan:C.border,transition:"background 0.3s"}}/>
+          ))}
+        </div>
+
+        {/* スライドコンテンツ */}
+        <div style={{flex:1}}>
+          <div style={{marginBottom:6,fontSize:11,color:C.cyan,letterSpacing:2,fontWeight:700}}>
+            {String(slide+1).padStart(2,"0")} / {String(total).padStart(2,"0")}
+          </div>
+          <h2 style={{fontSize:22,fontWeight:900,color:C.text,margin:"0 0 4px"}}>{s.title}</h2>
+          <p style={{fontSize:13,color:C.muted,margin:"0 0 20px"}}>{s.subtitle}</p>
+          {s.content}
+        </div>
+
+        {/* ナビゲーション */}
+        <div style={{display:"flex",gap:12,marginTop:24}}>
+          {slide > 0 && (
+            <button onClick={()=>setSlide(s=>s-1)}
+              style={{flex:1,padding:"14px 0",background:C.panel,border:`1px solid ${C.border}`,
+                borderRadius:10,color:C.muted,fontSize:14,cursor:"pointer",fontWeight:700}}>
+              ← 前へ
+            </button>
+          )}
+          <button onClick={()=>slide<total-1?setSlide(s=>s+1):onComplete()}
+            style={{flex:2,padding:"14px 0",
+              background:slide===total-1?`linear-gradient(135deg,#006080,${C.cyan})`:`${C.cyan}22`,
+              border:`1px solid ${C.cyan}`,borderRadius:10,
+              color:slide===total-1?"#fff":C.cyan,
+              fontSize:14,cursor:"pointer",fontWeight:700,
+              boxShadow:slide===total-1?`0 4px 20px ${C.cyan}44`:"none"}}>
+            {slide===total-1?"ゲームスタート 🚀":"次へ →"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+function PriceSettingScreen({ pendingPrice, onConfirm }) {
+  const { baseArpu, currentPrice, currentStores, priceSensitivity, isInitial } = pendingPrice;
+  const [inputPrice, setInputPrice] = useState(currentPrice || baseArpu);
+  const multiplier = calcPriceMultiplier(inputPrice, baseArpu);
+  const priceComp = calcPriceCompetitiveness(inputPrice, baseArpu);
+  const revenueChangePct = ((multiplier - 1.0) * 100).toFixed(1);
+  const hikeRatio = isInitial ? 0 : (inputPrice - currentPrice) / Math.max(currentPrice, 1);
+  const churnStores = (!isInitial && hikeRatio > 0) ? Math.floor((currentStores||0) * hikeRatio * (priceSensitivity||0.6)) : 0;
+
+  return (
+    <div style={bgBase}>
+      <div style={{maxWidth:560, margin:"0 auto", padding:"48px 20px"}}>
+        <div style={{textAlign:"center", marginBottom:28}}>
+          <div style={{fontSize:11,letterSpacing:4,color:C.yellow,marginBottom:8}}>
+            {isInitial ? "INITIAL PRICE SETTING" : "ANNUAL PRICE REVIEW"}
+          </div>
+          <h2 style={{fontSize:24,fontWeight:900,color:C.text,margin:"0 0 8px"}}>
+            {isInitial ? "初期価格を設定しよう" : "来年度の価格設定"}
+          </h2>
+          <p style={{fontSize:13,color:C.muted,lineHeight:1.6}}>
+            {isInitial
+              ? "ゲーム開始前に月額利用料を決めてください。\n価格は毎年見直せます。"
+              : `月額利用料を設定してください。\n`}
+            {!isInitial && <span style={{color:C.yellow}}>価格は年に1回のみ変更できます。</span>}
+          </p>
+        </div>
+
+        <Panel style={{marginBottom:16}}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:14}}>
+            <div>
+              <Label style={{display:"block",marginBottom:4}}>市場標準価格</Label>
+              <span style={{fontSize:20,fontWeight:900,color:C.muted,fontFamily:"'Courier New',monospace"}}>¥{baseArpu}万/月</span>
+            </div>
+            <div style={{textAlign:"right"}}>
+              <Label style={{display:"block",marginBottom:4}}>現在の設定価格</Label>
+              <span style={{fontSize:20,fontWeight:900,color:C.cyan,fontFamily:"'Courier New',monospace"}}>¥{currentPrice || baseArpu}万/月</span>
+            </div>
+          </div>
+
+          <Label style={{display:"block",marginBottom:8}}>新しい価格（万円/月）</Label>
+          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
+            <span style={{fontSize:16,color:C.muted,flexShrink:0}}>¥</span>
+            <input type="number" value={inputPrice} min={1}
+              onChange={e => setInputPrice(Math.max(1, Number(e.target.value)))}
+              style={{flex:1,background:C.bg,border:`2px solid ${C.cyan}`,borderRadius:8,
+                padding:"12px 16px",color:C.text,fontSize:24,fontWeight:900,
+                fontFamily:"'Courier New',monospace",outline:"none",textAlign:"right"}}
+            />
+            <span style={{fontSize:14,color:C.muted,flexShrink:0}}>万円/月</span>
+          </div>
+
+          {/* プリセット */}
+          <div style={{display:"flex",gap:6,marginBottom:16}}>
+            {[0.7,0.85,1.0,1.15,1.3].map(r=>{
+              const p=Math.round(baseArpu*r);
+              const label=r===0.7?"激安":r===0.85?"割安":r===1.0?"標準":r===1.15?"割高":"プレミアム";
+              return (
+                <button key={r} onClick={()=>setInputPrice(p)} style={{
+                  flex:1,padding:"6px 2px",borderRadius:8,fontSize:10,fontWeight:700,cursor:"pointer",
+                  border:`1px solid ${inputPrice===p?C.cyan:C.border}`,
+                  background:inputPrice===p?`${C.cyan}22`:C.bg,
+                  color:inputPrice===p?C.cyan:C.muted}}>
+                  <div>{label}</div>
+                  <div style={{fontFamily:"'Courier New',monospace"}}>¥{p}</div>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* 効果プレビュー */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+            {[
+              ["💰 売上/店舗", `${Number(revenueChangePct)>=0?"+":""}${revenueChangePct}%`,
+                Number(revenueChangePct)>=0?C.green:C.red],
+              ["📊 価格競争力", `${priceComp.toFixed(0)} pt`,
+                priceComp>=60?C.green:priceComp>=40?C.yellow:C.red],
+              ["📤 即時解約", churnStores>0?`-${churnStores}店`:"なし",
+                churnStores>0?C.red:C.green],
+            ].map(([l,v,c])=>(
+              <div key={l} style={{background:C.bg,borderRadius:8,padding:"10px",textAlign:"center",border:`1px solid ${c}33`}}>
+                <div style={{fontSize:10,color:C.muted,marginBottom:4}}>{l}</div>
+                <div style={{fontSize:16,fontWeight:900,color:c,fontFamily:"'Courier New',monospace"}}>{v}</div>
+              </div>
+            ))}
+          </div>
+          {churnStores > 0 && (
+            <div style={{marginTop:10,padding:"8px 12px",background:"#F8514912",border:"1px solid #F8514944",borderRadius:8,fontSize:11,color:"#F85149"}}>
+              ⚠️ 値上げ{(hikeRatio*100).toFixed(0)}% × 価格感度{((priceSensitivity||0.25)*100).toFixed(0)}% → 現在{currentStores||0}店の約{churnStores}店が即時解約
+            </div>
+          )}
+        </Panel>
+
+        <Panel style={{marginBottom:20,padding:"12px 16px",background:`${C.yellow}0A`,border:`1px solid ${C.yellow}33`}}>
+          <div style={{fontSize:11,color:C.yellow,fontWeight:700,marginBottom:4}}>💡 価格戦略</div>
+          <div style={{fontSize:11,color:C.muted,lineHeight:1.6}}>
+            {inputPrice < baseArpu*0.85 && "低価格：新規獲得加速・競合奪取しやすい。ただし1店舗あたり収益が下がる。"}
+            {inputPrice>=baseArpu*0.85&&inputPrice<=baseArpu*1.15 && "標準価格：安定したシェア維持。バランス型戦略。"}
+            {inputPrice > baseArpu*1.15 && "高価格：1店舗あたり収益が上がるが獲得ペースが落ちる。品質・ブランドが高い場合に有効。"}
+          </div>
+        </Panel>
+
+        <button onClick={()=>onConfirm(inputPrice)}
+          style={{width:"100%",background:`linear-gradient(135deg,#006080,${C.cyan})`,
+            color:"#fff",border:"none",borderRadius:10,padding:16,
+            fontSize:15,fontWeight:700,cursor:"pointer",letterSpacing:2,
+            boxShadow:`0 4px 20px ${C.cyan}44`}}>
+          ¥{inputPrice}万/月で来年度スタート →
+        </button>
+      </div>
+    </div>
+  );
+}
+
+
 const bgBase={minHeight:"100vh",background:"#0D1117",color:C.text,fontFamily:"'Noto Sans JP','Hiragino Sans',sans-serif"};
 
 function SetupMarket({onNext}) {
@@ -1291,7 +1691,14 @@ function SetupType({marketId,onStart,onBack}) {
 // MAIN APP
 // ============================================================
 export default function App() {
-  const [screen,setScreen]       = useState("lobby"); // lobby -> market -> type -> play...
+  const [screen,setScreen] = useState(() => {
+    // localStorage で表示済みかチェック（2回目以降はlobbyから）
+    try {
+      const done = localStorage.getItem("saas_tutorial_done");
+      return done ? "lobby" : "tutorial";
+    } catch { return "tutorial"; }
+  });
+  const [tutorialDone,setTutorialDone] = useState(false);
   const [onlineMode,setOnlineMode] = useState(false);
   const [onlineInfo,setOnlineInfo] = useState(null); // {roomCode, playerId, isHost}
   const [marketId,setMarketId]   = useState(null);
@@ -1309,9 +1716,10 @@ export default function App() {
   const [lastNetIncome,setLastNetIncome] = useState(0);
   const [prevNpcOps,setPrevNpcOps] = useState({});
   const [narratives,setNarratives] = useState([]);
-  const [pendingChoice,setPendingChoice]   = useState(null);  // 選択型イベント待機
-  const [activeEffects,setActiveEffects]   = useState([]);    // 継続効果 [{id,type,value,remaining}]
-  const [permanentOpexExtra,setPermanentOpexExtra] = useState(0); // 提携コスト等の永続増加
+  const [pendingChoice,setPendingChoice]   = useState(null);
+  const [activeEffects,setActiveEffects]   = useState([]);
+  const [permanentOpexExtra,setPermanentOpexExtra] = useState(0);
+  const [pendingPrice,setPendingPrice]     = useState(null); // 年次価格設定待ち
   const [tab,setTab]             = useState("budget");
   const [history,setHistory]     = useState([]);
 
@@ -1326,33 +1734,66 @@ export default function App() {
   useEffect(() => {
     if (!onlineMode || !room.roomData || !room.playerId) return;
     const rd = room.roomData;
-
-    // 自分のゲーム状態を同期
     const myState = rd.gameState?.[room.playerId];
-    if (myState && rd.status === "playing") {
+
+    // ★ playing状態でgameStateが更新されたとき自分のbs/opsを同期
+    if (rd.status === "playing" && myState) {
       if (myState.bs) setBs(myState.bs);
-      if (myState.ops) setOps(myState.ops);
+      if (myState.ops) setOps({...myState.ops});
       if (myState.usedSpecials) setUsedSpecials(myState.usedSpecials);
+      if (typeof rd.quarter === "number") setQuarter(rd.quarter);
+      setLastNetIncome(myState.lastNetIncome || 0);
     }
 
     // 結果画面への遷移
     if (rd.status === "result" && screen !== "result") {
+      // ★ 結果画面でも自分のgameStateを最新に更新
+      if (myState) {
+        setBs(myState.bs);
+        setOps({...myState.ops});
+        setUsedSpecials(myState.usedSpecials || []);
+        setLastNetIncome(myState.lastNetIncome || 0);
+      }
+      if (typeof rd.quarter === "number") setQuarter(rd.quarter);
       const myLog = rd.quarterLogs?.[room.playerId];
       if (myLog) {
         setLastPL(myLog.pl);
         setLastEvent(myLog.event || null);
         setNarratives(myLog.narratives || []);
       }
+      // ★ 他プレイヤーをNPCとして更新
+      const otherPlayers = Object.entries(rd.players || {})
+        .filter(([pid]) => pid !== room.playerId)
+        .map(([pid, p]) => {
+          const state = rd.gameState?.[pid];
+          return {
+            id: pid, name: p.name,
+            type: p.playerType,
+            icon: PLAYER_TYPES[p.playerType]?.icon || "👤",
+            color: ["#FF6B6B","#4ECDC4","#FFE66D"][Object.keys(rd.players).indexOf(pid) % 3],
+            strategy: "sales_heavy",
+            bs: state?.bs || {...PLAYER_TYPES[p.playerType]?.bs},
+            ops: state?.ops || {...PLAYER_TYPES[p.playerType]?.ops},
+          };
+        });
+      if (otherPlayers.length > 0) setNpcs(otherPlayers);
       setScreen("result");
     }
 
     // 年次レビューへの遷移
     if (rd.status === "yearreview" && screen !== "yearreview") {
+      if (myState) {
+        setBs(myState.bs);
+        setOps({...myState.ops});
+        setUsedSpecials(myState.usedSpecials || []);
+      }
+      if (typeof rd.quarter === "number") setQuarter(rd.quarter - 1); // yearreviewはQ進む前
       setScreen("yearreview");
     }
 
     // ゲームオーバー
     if (rd.status === "gameover" && screen !== "gameover") {
+      if (myState) { setBs(myState.bs); setOps({...myState.ops}); }
       setScreen("gameover");
     }
   }, [room.roomData, onlineMode]);
@@ -1495,7 +1936,16 @@ export default function App() {
       ops:{...PLAYER_TYPES[n.type].ops},
     })));
     setPlayerType(ptId);
-    setScreen("play");
+    // ★ 初回も価格設定を行う
+    const market = MARKETS[marketId];
+    setPendingPrice({
+      currentPrice: market?.arpu || 80,
+      baseArpu: market?.arpu || 80,
+      currentStores: 0,
+      priceSensitivity: market?.priceSensitivity || 0.6,
+      isInitial: true, // 初回フラグ（解約なし）
+    });
+    setScreen("pricesetting");
   }
 
   // BS連動型投資上限（継続効果のinvestBonusも加算）
@@ -1674,14 +2124,66 @@ export default function App() {
   }
 
   function advance() {
+    if (onlineMode) {
+      // オンラインモード：Firebaseのstatusをplayingに戻すだけ（quarterはFirebaseが管理）
+      room.advanceYear(); // status = "playing" に設定
+      setScreen("play"); setTab("budget");
+      return;
+    }
     if (quarter >= MAX_QUARTERS) { setScreen("gameover"); return; }
-    // 年末Q（Q4, Q8）は年次レビュー画面を挟む
     if (quarter % 4 === 0) { setScreen("yearreview"); return; }
     setQuarter(q=>q+1); setScreen("play"); setTab("budget");
   }
 
   function advanceFromYearReview() {
-    setQuarter(q=>q+1); setScreen("play"); setTab("budget");
+    const market = MARKETS[marketId];
+    setPendingPrice({
+      currentPrice: ops.setPrice || market?.arpu || 80,
+      baseArpu: market?.arpu || 80,
+      currentStores: ops.stores || 0,
+      priceSensitivity: market?.priceSensitivity || 0.6,
+    });
+    setScreen("pricesetting");
+  }
+
+  function confirmPrice(newPrice) {
+    const market = MARKETS[marketId];
+    const baseArpu = market?.arpu || 80;
+    const prevPrice = pendingPrice?.isInitial ? newPrice : (ops.setPrice || baseArpu);
+    const multiplier = calcPriceMultiplier(newPrice, baseArpu);
+    const newPriceComp = calcPriceCompetitiveness(newPrice, baseArpu);
+
+    // 初回は解約なし。値上げ時のみ解約発生
+    const hikeRatio = pendingPrice?.isInitial ? 0 : (newPrice - prevPrice) / Math.max(prevPrice, 1);
+    let churnStores = 0;
+    let churnMessage = null;
+    if (hikeRatio > 0 && ops.stores > 0) {
+      const sensitivity = market?.priceSensitivity || 0.6;
+      churnStores = Math.floor(ops.stores * hikeRatio * sensitivity);
+      if (churnStores > 0) {
+        churnMessage = {
+          icon: "📤", color: "#F85149",
+          text: `値上げ（+${(hikeRatio*100).toFixed(0)}%）により ${churnStores}店が解約。市場での価格競争力も低下します。`,
+        };
+      }
+    }
+
+    setOps(o => ({
+      ...o,
+      setPrice: newPrice,
+      priceMultiplier: multiplier,
+      priceCompetitiveness: newPriceComp,
+      stores: Math.max(0, (o.stores||0) - churnStores),
+    }));
+    if (churnMessage) setNarratives([churnMessage]);
+    setPendingPrice(null);
+
+    // 初回はquarterを進めずplay画面へ（year reviewからは進める）
+    if (!pendingPrice?.isInitial) {
+      setQuarter(q => q + 1);
+    }
+    setScreen("play");
+    setTab("budget");
   }
 
   const yr=Math.ceil(quarter/4), qq=((quarter-1)%4)+1;
@@ -1693,9 +2195,17 @@ export default function App() {
     ...npcs.map(n=>({...n,totalAssets:totalAssets(n.bs),stores:Math.floor(n.ops.stores)||0}))
   ].sort((a,b)=>b.totalAssets-a.totalAssets) : [];
 
+  if (screen==="tutorial") return (
+    <TutorialScreen onComplete={()=>{
+      try { localStorage.setItem("saas_tutorial_done","1"); } catch {}
+      setTutorialDone(true);
+      setScreen("lobby");
+    }}/>
+  );
   if (screen==="lobby") return (
     <OnlineLobby
       room={room}
+      onTutorial={()=>setScreen("tutorial")}
       onSolo={(info) => {
         if (info && info.mode === "online") {
           // オンラインモード：ゲーム開始
@@ -1787,6 +2297,11 @@ export default function App() {
         </div>
       </div>
     );
+  }
+
+  // PRICE SETTING SCREEN（年次レビュー後）
+  if (screen === "pricesetting" && pendingPrice) {
+    return <PriceSettingScreen pendingPrice={pendingPrice} onConfirm={confirmPrice} />;
   }
 
   // YEAR REVIEW SCREEN
