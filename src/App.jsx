@@ -46,14 +46,14 @@ const PLAYER_TYPES = {
     id:"vendor", name:"既存SaaSベンダー", icon:"🏢",
     desc:"営業網と資金力が強み。ただし組織が重く固定費が高い。",
     bs:  { cash:2000, softwareAsset:0, otherAsset:500, debt:0, capital:2500, retainedEarnings:0 },
-    ops: { solutionQuality:40, salesPower:60, brandAwareness:55, priceCompetitiveness:45, supportQuality:50, stores:0, setPrice:0, priceMultiplier:1.0 },
+    ops: { solutionQuality:40, salesPower:60, brandAwareness:55, supportQuality:50, stores:0, setPrice:0, priceMultiplier:1.0 },
     investRatio: 0.10, baseOpex: 200, investEfficiency: 1.0,
   },
   startup: {
     id:"startup", name:"スタートアップ", icon:"🚀",
     desc:"少ない予算でも投資効率1.8倍。集中投資で特定パラメータを一気に伸ばせる。",
     bs:  { cash:400, softwareAsset:0, otherAsset:50, debt:0, capital:450, retainedEarnings:0 },
-    ops: { solutionQuality:55, salesPower:20, brandAwareness:20, priceCompetitiveness:60, supportQuality:35, stores:0, setPrice:0, priceMultiplier:1.0 },
+    ops: { solutionQuality:55, salesPower:20, brandAwareness:20, supportQuality:35, stores:0, setPrice:0, priceMultiplier:1.0 },
     investRatio: 0.12, baseOpex: 40, investEfficiency: 1.8,
   },
 };
@@ -81,19 +81,16 @@ const NPC_PROFILES = [
 // ============================================================
 const BUDGET_ITEMS = [
   { id:"sales",    name:"営業強化",       icon:"👥", color:"#06B6D4",
-    param:"salesPower",          basePer100:0.8, decay:0.8, capitalize:false,
+    param:"salesPower",      basePer100:0.8, decay:0.8, capitalize:false,
     desc:"salesPower上昇（逓減あり）。未投資で毎Q-0.8。" },
   { id:"dev",      name:"プロダクト開発", icon:"⚙️", color:"#A855F7",
-    param:"solutionQuality",     basePer100:0.8, decay:0.6, capitalize:true,
+    param:"solutionQuality", basePer100:0.8, decay:0.6, capitalize:true,
     desc:"solutionQuality上昇（逓減あり）。未投資で毎Q-0.6。資産計上。" },
   { id:"marketing",name:"マーケ",         icon:"📢", color:"#E3B341",
-    param:"brandAwareness",      basePer100:1.0, decay:1.0, capitalize:false,
+    param:"brandAwareness",  basePer100:1.0, decay:1.0, capitalize:false,
     desc:"brandAwareness上昇（逓減あり）。未投資で毎Q-1.0。" },
-  { id:"price",    name:"価格競争力",     icon:"💴", color:"#3FB950",
-    param:"priceCompetitiveness",basePer100:1.0, decay:0.4, capitalize:false,
-    desc:"priceCompetitiveness上昇（逓減あり）。未投資で毎Q-0.4。" },
   { id:"cs",       name:"CS・サポート",   icon:"🎧", color:"#FFA657",
-    param:"supportQuality",      basePer100:0.9, decay:0.8, capitalize:false,
+    param:"supportQuality",  basePer100:0.9, decay:0.8, capitalize:false,
     desc:"supportQuality上昇（逓減あり）。未投資で毎Q-0.8。" },
 ];
 
@@ -116,7 +113,7 @@ const SPECIAL_ACTIONS = {
   pr_push:      { id:"pr_push",     icon:"📰", name:"メディアPR",        cost:300,
     desc:"brandAwareness+40。大型PR投資で一時的な知名度急上昇。", effects:{brandAwareness:40}, cat:"marketing" },
   price_campaign:{ id:"price_campaign", icon:"🎁", name:"導入キャンペーン", cost:200,
-    desc:"priceCompetitiveness+35。値下げで新規獲得を一時的に増加。", effects:{priceCompetitiveness:35}, cat:"price" },
+    desc:"setPrice-10%。一時値下げで新規獲得を加速。", priceDiscount:0.10, cat:"price" },
   fund_seed:    { id:"fund_seed",    icon:"🌱", name:"シード調達",      cost:0,
     desc:"黎明期限定。資本金+500万。1回限り。ARRの約3ヶ月分。", cashGain:500, capitalGain:500, startupOnly:true, oneTime:true, cat:"funding", phase:"dawn" },
   fund_series_a:{ id:"fund_series_a",icon:"💰", name:"シリーズA調達",  cost:0,
@@ -258,10 +255,14 @@ function debtRatio(bs) {
 // GAME ENGINE
 // ============================================================
 
-function competitiveScore(ops) {
+function competitiveScore(ops, baseArpu) {
   const bc = Math.log2(1 + ops.brandAwareness) / Math.log2(101);
+  // 価格スコア：標準=50pt、30%安=80pt、30%高=20pt（範囲0〜100）
+  const priceScore = (baseArpu && ops.setPrice)
+    ? Math.max(0, Math.min(100, 50 - (ops.setPrice - baseArpu) / baseArpu * 100))
+    : 50; // 未設定時は標準の50pt
   return ops.salesPower * 0.30 + ops.solutionQuality * 0.25
-       + bc * 25 + ops.priceCompetitiveness * 0.20 + ops.supportQuality * 0.10;
+       + bc * 25 + priceScore * 0.20 + ops.supportQuality * 0.10;
 }
 
 function calcChurn(ops) {
@@ -276,21 +277,10 @@ function calcRevenue(ops, market) {
   return Math.floor(ops.stores * market.arpu * priceMultiplier);
 }
 
-// 価格設定からpriceMultiplierとcompetitiveness補正を計算
-// basePrice = market.arpu（標準価格）
-// 低価格 → シェア獲得ボーナス、ARPU減少
-// 高価格 → ARPU増加、シェア獲得ペナルティ
+// 価格設定からpriceMultiplierを計算
 function calcPriceMultiplier(setPrice, baseArpu) {
   if (!setPrice || setPrice <= 0) return 1.0;
   return setPrice / baseArpu;
-}
-
-// 価格競争力スコア（設定価格が安いほど高い）
-function calcPriceCompetitiveness(setPrice, baseArpu) {
-  if (!setPrice || setPrice <= 0) return 50;
-  const ratio = setPrice / baseArpu; // 1.0 = 標準
-  // ratio 0.7 → score 80, ratio 1.0 → score 50, ratio 1.3 → score 20
-  return Math.max(0, Math.min(PARAM_MAX, Math.round(50 - (ratio - 1.0) * 100)));
 }
 
 function calcVarCost(ops, market) {
@@ -327,8 +317,15 @@ function applySpecialAction(bs, ops, actionId, usedActions) {
   if (action.capitalGain) newBs.capital += action.capitalGain;
   if (action.debtGain)    newBs.debt    += action.debtGain;
   if (action.fullRepay)   { newBs.cash -= newBs.debt; newBs.debt = 0; }
-  if (action.effects)     Object.entries(action.effects).forEach(([k,v]) => { newOps[k] = Math.min(100, newOps[k] + v); });
-  if (action.storeBonus)  newOps.stores += action.storeBonus;
+  if (action.effects)      Object.entries(action.effects).forEach(([k,v]) => { newOps[k] = Math.min(100, newOps[k] + v); });
+  if (action.storeBonus)   newOps.stores += action.storeBonus;
+  if (action.priceDiscount && newOps.setPrice > 0) {
+    // 一時値下げ：setPrice × (1 - discount)
+    newOps = {...newOps,
+      setPrice: Math.max(1, Math.floor(newOps.setPrice * (1 - action.priceDiscount))),
+      priceMultiplier: Math.max(0.1, newOps.priceMultiplier * (1 - action.priceDiscount))
+    };
+  }
   return { bs: newBs, ops: newOps, sgaAdd, capitalizeAmt };
 }
 
@@ -340,7 +337,8 @@ function resolveMarket(allPlayers, market, quarter, extraUnclaimed = 0) {
   const currentTotal = allPlayers.reduce((s, p) => s + p.ops.stores, 0);
   const unclaimed = Math.max(0, totalAvail - currentTotal);
 
-  const scores = allPlayers.map(p => competitiveScore(p.ops));
+  const baseArpu = market?.arpu || 80;
+  const scores = allPlayers.map(p => competitiveScore(p.ops, baseArpu));
   const totalScore = scores.reduce((s, x) => s + x, 0);
 
   return allPlayers.map((player, i) => {
@@ -761,7 +759,7 @@ function BudgetAllocator({ availableBudget, allocation, onChange, bs, playerType
           // パラメータ名の日本語マッピング
           const paramLabels = {
             salesPower:"営業力", solutionQuality:"品質",
-            brandAwareness:"ブランド", priceCompetitiveness:"価格競争力", supportQuality:"CS"
+            brandAwareness:"ブランド", supportQuality:"CS"
           };
           return (
             <div key={item.id} style={{background:C.bg,borderRadius:10,padding:"10px 14px",
@@ -1430,7 +1428,8 @@ function PriceSettingScreen({ pendingPrice, onConfirm }) {
   const { baseArpu, currentPrice, currentStores, priceSensitivity, isInitial } = pendingPrice;
   const [inputPrice, setInputPrice] = useState(currentPrice || baseArpu);
   const multiplier = calcPriceMultiplier(inputPrice, baseArpu);
-  const priceComp = calcPriceCompetitiveness(inputPrice, baseArpu);
+  // 価格スコア（competitiveScoreと同じ計算）
+  const priceScore = Math.max(0, Math.min(100, 50 - (inputPrice - baseArpu) / Math.max(baseArpu, 1) * 100));
   const revenueChangePct = ((multiplier - 1.0) * 100).toFixed(1);
   const hikeRatio = isInitial ? 0 : (inputPrice - currentPrice) / Math.max(currentPrice, 1);
   const churnStores = (!isInitial && hikeRatio > 0) ? Math.floor((currentStores||0) * hikeRatio * (priceSensitivity||0.6)) : 0;
@@ -1500,8 +1499,8 @@ function PriceSettingScreen({ pendingPrice, onConfirm }) {
             {[
               ["💰 売上/店舗", `${Number(revenueChangePct)>=0?"+":""}${revenueChangePct}%`,
                 Number(revenueChangePct)>=0?C.green:C.red],
-              ["📊 価格競争力", `${priceComp.toFixed(0)} pt`,
-                priceComp>=60?C.green:priceComp>=40?C.yellow:C.red],
+              ["📊 競争力スコア寄与", `${priceScore.toFixed(0)} pt`,
+                priceScore>=35?C.green:priceScore>=20?C.yellow:C.red],
               ["📤 即時解約", churnStores>0?`-${churnStores}店`:"なし",
                 churnStores>0?C.red:C.green],
             ].map(([l,v,c])=>(
@@ -1643,7 +1642,7 @@ function SetupType({marketId,onStart,onBack}) {
                   </div>
                 </div>
                 {[["⚙️ 品質",pt.ops.solutionQuality,C.purple],["👥 営業力",pt.ops.salesPower,C.cyan],
-                  ["📢 ブランド",pt.ops.brandAwareness,C.yellow],["💴 価格",pt.ops.priceCompetitiveness,C.green],
+                  ["📢 ブランド",pt.ops.brandAwareness,C.yellow],
                   ["🎧 CS",pt.ops.supportQuality,C.orange]].map(([l,v,c])=>(
                   <div key={l} style={{marginBottom:7}}>
                     <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
@@ -2020,7 +2019,7 @@ export default function App() {
       });
       if (ev.opsRisk) {
         if (ev.opsRisk.randomParam) {
-          const params = ["salesPower","solutionQuality","brandAwareness","priceCompetitiveness","supportQuality"];
+          const params = ["salesPower","solutionQuality","brandAwareness","supportQuality"];
           const target = params[Math.floor(Math.random()*params.length)];
           finalOps = {...finalOps, [target]: Math.max(0, (finalOps[target]||0)+ev.opsRisk.randomParam)};
         }
@@ -2044,13 +2043,13 @@ export default function App() {
       if (ev.npcBoostTarget) npcBoostAll = ev.npcBoostTarget.allParams || 0;
       // LINE Partner Bonus
       if (ev.lineFeatureBonus) {
-        const myScore = competitiveScore(finalOps);
-        const topScore = Math.max(myScore, ...newNpcs.map(n=>competitiveScore(n.ops)));
+        const myScore = competitiveScore(finalOps, market?.arpu);
+        const topScore = Math.max(myScore, ...newNpcs.map(n=>competitiveScore(n.ops, market?.arpu)));
         if (myScore >= topScore) finalOps = {...finalOps, solutionQuality: Math.min(PARAM_MAX,(finalOps.solutionQuality||0)+15)};
       }
       if (ev.partnerBonus) {
-        const myScore = competitiveScore(finalOps);
-        const topScore = Math.max(myScore, ...newNpcs.map(n=>competitiveScore(n.ops)));
+        const myScore = competitiveScore(finalOps, market?.arpu);
+        const topScore = Math.max(myScore, ...newNpcs.map(n=>competitiveScore(n.ops, market?.arpu)));
         if (myScore >= topScore) newActiveEffects.push({id:"partnerBonus", type:"acquisitionBonus", value:0.5, remaining:1});
       }
     }
@@ -2071,8 +2070,8 @@ export default function App() {
     // 選択型イベントは処理を一時停止して選択を待つ
     if (ev && ev.type === "choice") {
       // 先にPL結果を保存してから選択画面へ
-      const myScore2 = competitiveScore(finalOps);
-      const enrichedResult2 = {...pl.competResult, quarter, myScore:myScore2, rivalScores:finalNpcs.map(n=>competitiveScore(n.ops))};
+      const myScore2 = competitiveScore(finalOps, market?.arpu);
+      const enrichedResult2 = {...pl.competResult, quarter, myScore:myScore2, rivalScores:finalNpcs.map(n=>competitiveScore(n.ops, market?.arpu))};
       const newNarratives2 = generateCompetitiveNarrative(enrichedResult2, finalNpcs, prevNpcOps, getPhase(quarter));
       setHistory(h=>[...h,{quarter,totalAssets:totalAssets(finalBs),stores:Math.floor(finalOps.stores)||0,netIncome:pl.netIncome,phase:getPhase(quarter).name,npcSnapshot:finalNpcs.map(n=>({id:n.id,name:n.name,color:n.color,stores:Math.floor(n.ops.stores)||0,totalAssets:totalAssets(n.bs)}))}]);
       setPrevNpcOps(Object.fromEntries(finalNpcs.map(n=>[n.id,{...n.ops}])));
@@ -2087,8 +2086,8 @@ export default function App() {
     }
 
     // 通常処理
-    const myScore = competitiveScore(finalOps);
-    const enrichedResult = {...pl.competResult, quarter, myScore, rivalScores:finalNpcs.map(n=>competitiveScore(n.ops))};
+    const myScore = competitiveScore(finalOps, market?.arpu);
+    const enrichedResult = {...pl.competResult, quarter, myScore, rivalScores:finalNpcs.map(n=>competitiveScore(n.ops, market?.arpu))};
     const newNarratives = generateCompetitiveNarrative(enrichedResult, finalNpcs, prevNpcOps, getPhase(quarter));
 
     setHistory(h=>[...h,{quarter,totalAssets:totalAssets(finalBs),stores:Math.floor(finalOps.stores)||0,netIncome:pl.netIncome,phase:getPhase(quarter).name,npcSnapshot:finalNpcs.map(n=>({id:n.id,name:n.name,color:n.color,stores:Math.floor(n.ops.stores)||0,totalAssets:totalAssets(n.bs)}))}]);
@@ -2151,7 +2150,6 @@ export default function App() {
     const baseArpu = market?.arpu || 80;
     const prevPrice = pendingPrice?.isInitial ? newPrice : (ops.setPrice || baseArpu);
     const multiplier = calcPriceMultiplier(newPrice, baseArpu);
-    const newPriceComp = calcPriceCompetitiveness(newPrice, baseArpu);
 
     // 初回は解約なし。値上げ時のみ解約発生
     const hikeRatio = pendingPrice?.isInitial ? 0 : (newPrice - prevPrice) / Math.max(prevPrice, 1);
@@ -2172,7 +2170,6 @@ export default function App() {
       ...o,
       setPrice: newPrice,
       priceMultiplier: multiplier,
-      priceCompetitiveness: newPriceComp,
       stores: Math.max(0, (o.stores||0) - churnStores),
     }));
     if (churnMessage) setNarratives([churnMessage]);
@@ -2306,19 +2303,34 @@ export default function App() {
 
   // YEAR REVIEW SCREEN
   if (screen === "yearreview") {
-    const completedYear = Math.ceil(quarter / 4);
+    // quarterはyearreview遷移時点の値（Q4またはQ8）
+    const completedYear = quarter <= 4 ? 1 : quarter <= 8 ? 2 : 3;
     const qStart = (completedYear - 1) * 4 + 1;
-    const yearHistory = history.filter(h => h.quarter >= qStart && h.quarter <= quarter);
+    const qEnd   = completedYear * 4;
+
+    // historyからYear分を抽出（quarterが一致するものを使う）
+    const yearHistory = history.filter(h => h.quarter >= qStart && h.quarter <= qEnd);
+
+    // ★ 直接bs/opsから取る（historyが空でも表示できる）
+    const yearEndTA     = totalAssets(bs);
+    const yearEndStores = Math.floor(ops.stores) || 0;
+
     const prevYearEndTA = completedYear > 1
       ? (history.find(h => h.quarter === qStart - 1)?.totalAssets || 0)
-      : totalAssets(PLAYER_TYPES[playerType]?.bs || {cash:0,softwareAsset:0,otherAsset:0});
-    const yearEndTA = yearHistory[yearHistory.length-1]?.totalAssets || 0;
+      : totalAssets(PLAYER_TYPES[playerType]?.bs || {cash:0, softwareAsset:0, otherAsset:0});
     const taGrowth = yearEndTA - prevYearEndTA;
-    const yearEndStores = yearHistory[yearHistory.length-1]?.stores || 0;
-    const phaseNext = getPhase(quarter + 1);
-    const maxTA = Math.max(...yearHistory.map(h=>h.totalAssets), 1);
-    const maxStores = Math.max(...yearHistory.map(h=>h.stores), 1);
-    const lastSnapshot = yearHistory[yearHistory.length-1]?.npcSnapshot || [];
+
+    const phaseNext = getPhase(qEnd + 1);
+
+    // グラフ用：historyがあれば使い、なければ現在値だけ
+    const chartData = yearHistory.length > 0 ? yearHistory : [{
+      quarter: qEnd, totalAssets: yearEndTA, stores: yearEndStores,
+      netIncome: lastNetIncome, phase: getPhase(qEnd).name
+    }];
+    const maxTA     = Math.max(...chartData.map(h => h.totalAssets), yearEndTA, 1);
+    const maxStores = Math.max(...chartData.map(h => h.stores), yearEndStores, 1);
+    const lastSnapshot = yearHistory[yearHistory.length-1]?.npcSnapshot
+      || npcs.map(n => ({id:n.id, name:n.name, color:n.color, stores:Math.floor(n.ops.stores)||0, totalAssets:totalAssets(n.bs)}));
 
     return (
       <div style={bgBase}>
@@ -2354,7 +2366,7 @@ export default function App() {
           <Panel style={{marginBottom:14}}>
             <Label style={{display:"block", marginBottom:10}}>総資産推移（Year {completedYear}）</Label>
             <div style={{display:"flex", alignItems:"flex-end", gap:6, height:80}}>
-              {yearHistory.map((h,i)=>(
+              {chartData.map((h,i)=>(
                 <div key={i} style={{flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:4}}>
                   <div style={{fontSize:9, color:C.muted, fontFamily:"'Courier New',monospace"}}>
                     ¥{Math.round(h.totalAssets/100)/10}k
@@ -2372,7 +2384,7 @@ export default function App() {
           <Panel style={{marginBottom:14}}>
             <Label style={{display:"block", marginBottom:10}}>店舗数推移（Year {completedYear}）</Label>
             <div style={{display:"flex", alignItems:"flex-end", gap:6, height:60}}>
-              {yearHistory.map((h,i)=>(
+              {chartData.map((h,i)=>(
                 <div key={i} style={{flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:4}}>
                   <div style={{fontSize:9, color:C.muted}}>{h.stores}</div>
                   <div style={{width:"100%", background:C.purple, borderRadius:"3px 3px 0 0",
@@ -2558,14 +2570,14 @@ export default function App() {
 
           {/* 競争スコア差の警告 */}
           {(() => {
-            const myScore = competitiveScore(ops);
-            const threats = npcs.filter(n => competitiveScore(n.ops) > myScore + 5);
+            const myScore = competitiveScore(ops, market?.arpu);
+            const threats = npcs.filter(n => competitiveScore(n.ops, market?.arpu) > myScore + 5);
             if (threats.length === 0) return null;
             return (
               <div style={{background:"#F8514912",border:"1px solid #F8514944",borderRadius:8,padding:"10px 14px",marginBottom:14}}>
                 <div style={{fontSize:12,fontWeight:700,color:"#F85149",marginBottom:6}}>⚠️ スコア劣位 — 来Q以降の流出リスク</div>
                 {threats.map(n => {
-                  const diff = competitiveScore(n.ops) - myScore;
+                  const diff = competitiveScore(n.ops, market?.arpu) - myScore;
                   const lossRate = Math.min(20, Math.floor(diff * 0.25 * getPhase(quarter).stealMultiplier));
                   return (
                     <div key={n.id} style={{fontSize:11,color:"#8B949E",marginTop:3}}>
@@ -2602,8 +2614,8 @@ export default function App() {
           <Panel style={{marginTop:14}}>
             <Label style={{display:"block",marginBottom:10}}>競合の動向</Label>
             {npcs.map(n => {
-              const nScore = competitiveScore(n.ops);
-              const myScore = competitiveScore(ops);
+              const nScore = competitiveScore(n.ops, market?.arpu);
+              const myScore = competitiveScore(ops, market?.arpu);
               const scoreDiff = nScore - myScore;
               return (
                 <div key={n.id} style={{
@@ -2634,7 +2646,7 @@ export default function App() {
                           ["品質", n.ops.solutionQuality - prev.solutionQuality, C.purple],
                           ["営業", n.ops.salesPower - prev.salesPower, C.cyan],
                           ["ブランド", n.ops.brandAwareness - prev.brandAwareness, C.yellow],
-                          ["価格", n.ops.priceCompetitiveness - prev.priceCompetitiveness, C.green],
+                          
                           ["CS", n.ops.supportQuality - prev.supportQuality, C.orange],
                         ].filter(([,v]) => Math.abs(v) >= 0.5);
                         return changes.length > 0 ? (
@@ -2713,7 +2725,7 @@ export default function App() {
             ["💚 純資産",`¥${equity(bs).toLocaleString()}万`,equity(bs)>=0?C.green:C.red],
             ["🏪 店舗数",`${ops.stores}店`,C.text],
             ["💳 借入金",`¥${bs.debt}万`,bs.debt>0?C.yellow:C.muted],
-            ["🎯 競争力",`${competitiveScore(ops).toFixed(0)}`,C.purple],
+            ["🎯 競争力",`${competitiveScore(ops, market?.arpu).toFixed(0)}`,C.purple],
           ].map(([l,v,c,h])=>(
             <Panel key={l} style={{textAlign:"center",padding:"8px 6px",border:`1px solid ${h?C.cyan:C.border}`,boxShadow:h?`0 0 16px ${C.cyan}22`:"none"}}>
               <div style={{fontSize:h?16:14,fontWeight:900,color:c,fontFamily:"'Courier New',monospace"}}>{v}</div>
@@ -2865,7 +2877,6 @@ export default function App() {
               {[["⚙️ ソリューション品質","solutionQuality",C.purple],
                 ["👥 営業力","salesPower",C.cyan],
                 ["📢 ブランド認知","brandAwareness",C.yellow],
-                ["💴 価格競争力","priceCompetitiveness",C.green],
                 ["🎧 サポート品質","supportQuality",C.orange]
               ].map(([l,k,c])=>(
                 <div key={k} style={{marginBottom:12}}>
@@ -2891,7 +2902,7 @@ export default function App() {
             <div>
               <Panel style={{marginBottom:12}}>
                 <Label style={{display:"block",marginBottom:10}}>競争力スコア比較</Label>
-                {[{name:"あなた",score:competitiveScore(ops),color:C.cyan,isPlayer:true},...npcs.map(n=>({name:n.name,score:competitiveScore(n.ops),color:n.color}))].map(p=>(
+                {[{name:"あなた",score:competitiveScore(ops, market?.arpu),color:C.cyan,isPlayer:true},...npcs.map(n=>({name:n.name,score:competitiveScore(n.ops, market?.arpu),color:n.color}))].map(p=>(
                   <div key={p.name} style={{marginBottom:10}}>
                     <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
                       <span style={{fontSize:11,color:p.isPlayer?C.cyan:p.color,fontWeight:p.isPlayer?700:400}}>{p.name}</span>
@@ -3016,7 +3027,7 @@ export default function App() {
                   <span style={{fontSize:20}}>{p.icon}</span>
                   <div style={{flex:1}}>
                     <div style={{fontSize:13,fontWeight:700,color:p.color}}>{p.name}</div>
-                    <div style={{fontSize:10,color:C.muted}}>{p.stores}店 | 純資産¥{equity(p.bs).toLocaleString()}万 | score:{competitiveScore(p.ops).toFixed(0)}</div>
+                    <div style={{fontSize:10,color:C.muted}}>{p.stores}店 | 純資産¥{equity(p.bs).toLocaleString()}万 | score:{competitiveScore(p.ops, market?.arpu).toFixed(0)}</div>
                   </div>
                   <div style={{textAlign:"right"}}>
                     <div style={{fontSize:16,fontWeight:900,color:C.cyan,fontFamily:"'Courier New',monospace"}}>¥{p.totalAssets.toLocaleString()}万</div>
