@@ -2469,7 +2469,14 @@ export default function App() {
               </div>
             ))}
           </Panel>
-          <button onClick={()=>{setScreen("market");setMarketId(null);setPlayerType(null);setBs(null);setOps(null);setQuarter(1);setUsedSpecials([]);setHistory([]);setLastPL(null);setLastEvent(null);setLastNetIncome(0);setPrevNpcOps({});setNarratives([]);setAllocation({sales:0,dev:0,marketing:0,price:0,cs:0});}}
+          <button onClick={()=>{
+            setScreen("lobby");setMarketId(null);setPlayerType(null);setBs(null);setOps(null);
+            setQuarter(1);setUsedSpecials([]);setHistory([]);setLastPL(null);setLastEvent(null);
+            setLastNetIncome(0);setPrevNpcOps({});setNarratives([]);
+            setAllocation({sales:0,dev:0,marketing:0,price:0,cs:0});
+            setOnlineMode(false);setOnlineInfo(null);
+            setPendingChoice(null);setPendingPrice(null);setActiveEffects([]);setPermanentOpexExtra(0);
+          }}
             style={{background:`linear-gradient(135deg,#006080,${C.cyan})`,color:"#fff",border:"none",borderRadius:10,padding:"14px 48px",fontSize:15,fontWeight:700,cursor:"pointer",letterSpacing:2}}>
             もう一度プレイ
           </button>
@@ -2810,12 +2817,15 @@ export default function App() {
                     : "特別アクションなし（スキップ可）"}
                 </div>
               </Panel>
-              <button onClick={executeQuarter} disabled={!canExecute}
+              <button
+                onClick={onlineMode ? onlineSubmitAllocation : executeQuarter}
+                disabled={onlineMode ? (room.myPlayer?.ready || !canExecute) : !canExecute}
                 style={{background:canExecute?`linear-gradient(135deg,#006080,${C.cyan})`:C.border,
                   color:canExecute?"#fff":C.muted,border:"none",borderRadius:10,
-                  padding:"12px 24px",fontSize:14,fontWeight:700,cursor:canExecute?"pointer":"not-allowed",
+                  padding:"12px 24px",fontSize:14,fontWeight:700,
+                  cursor:canExecute?"pointer":"not-allowed",
                   letterSpacing:1,whiteSpace:"nowrap"}}>
-                四半期を進める →
+                {onlineMode ? (room.myPlayer?.ready ? "⏳ 全員の準備待ち..." : "準備完了 ✓") : "四半期を進める →"}
               </button>
             </div>
           </>
