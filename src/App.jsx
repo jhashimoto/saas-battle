@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { useRoom } from "./useRoom.js";
+import { useRoom, GAME_VERSION, TUTORIAL_KEY, clearRoomStorage } from "./useRoom.js";
 
 // ============================================================
 // DESIGN PHILOSOPHY
@@ -1704,7 +1704,7 @@ export default function App() {
   const [screen,setScreen] = useState(() => {
     // localStorage で表示済みかチェック（2回目以降はlobbyから）
     try {
-      const done = localStorage.getItem("saas_tutorial_done");
+      const done = localStorage.getItem(TUTORIAL_KEY);
       return done ? "lobby" : "tutorial";
     } catch { return "tutorial"; }
   });
@@ -2205,7 +2205,7 @@ export default function App() {
 
   if (screen==="tutorial") return (
     <TutorialScreen onComplete={()=>{
-      try { localStorage.setItem("saas_tutorial_done","1"); } catch {}
+      try { localStorage.setItem(TUTORIAL_KEY,"1"); } catch {}
       setTutorialDone(true);
       setScreen("lobby");
     }}/>
