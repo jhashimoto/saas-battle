@@ -2135,18 +2135,20 @@ export default function App() {
 
   function advance() {
     if (onlineMode) {
-      // オンラインモード：Firebaseのstatusをplayingに戻すだけ（quarterはFirebaseが管理）
-      room.advanceYear(); // status = "playing" に設定
+      room.advanceYear();
       setScreen("play"); setTab("budget");
       return;
     }
     if (quarter >= MAX_QUARTERS) { setScreen("gameover"); return; }
+    // yearreview判定：現在のQ（result画面）が4の倍数なら年末
     if (quarter % 4 === 0) { setScreen("yearreview"); return; }
-    setQuarter(q=>q+1); setScreen("play"); setTab("budget");
+    setQuarter(q => q + 1); setScreen("play"); setTab("budget");
   }
 
   function advanceFromYearReview() {
     const market = MARKETS[marketId];
+    // ★ yearreview終了時にquarterを進める（Q4→Q5、Q8→Q9）
+    setQuarter(q => q + 1);
     setPendingPrice({
       currentPrice: ops.setPrice || market?.arpu || 80,
       baseArpu: market?.arpu || 80,
@@ -2186,10 +2188,8 @@ export default function App() {
     if (churnMessage) setNarratives([churnMessage]);
     setPendingPrice(null);
 
-    // 初回はquarterを進めずplay画面へ（year reviewからは進める）
-    if (!pendingPrice?.isInitial) {
-      setQuarter(q => q + 1);
-    }
+    // ★ quarterは advance() で管理するためここでは進めない
+    // yearreview → pricesetting → play の流れでは setQuarter は不要
     setScreen("play");
     setTab("budget");
   }
