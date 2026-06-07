@@ -257,18 +257,26 @@ function debtRatio(bs) {
 
 function competitiveScore(ops, baseArpu) {
   const bc = Math.log2(1 + ops.brandAwareness) / Math.log2(101);
-  // 価格スコア：標準=50pt、30%安=80pt、30%高=20pt（範囲0〜100）
+  // 価格スコア：指数0.5（急峻カーブ）
+  // 値上げは急激にスコアが落ち、値下げは急激に上がる
   const priceScore = (baseArpu && ops.setPrice)
-    ? Math.max(0, Math.min(100, 50 - (ops.setPrice - baseArpu) / baseArpu * 100))
-    : 50; // 未設定時は標準の50pt
+    ? (() => {
+        const ratio = (ops.setPrice - baseArpu) / baseArpu;
+        const curved = Math.sign(ratio) * Math.pow(Math.abs(ratio), 0.5);
+        return Math.max(0, Math.min(100, 50 - curved * 80));
+      })()
+    : 50;
   return ops.salesPower * 0.30 + ops.solutionQuality * 0.25
        + bc * 25 + priceScore * 0.20 + ops.supportQuality * 0.10;
 }
 
 function calcChurn(ops) {
   const base = 0.12;
-  return Math.max(0.02, Math.min(0.35,
-    base - (ops.supportQuality - 50) * 0.004 - (ops.solutionQuality - 50) * 0.001));
+  return Math.max(0.005, Math.min(0.35,
+    base
+    - (ops.supportQuality - 50) * 0.0015
+    - (ops.solutionQuality - 50) * 0.0006
+  ));
 }
 
 function calcRevenue(ops, market) {
@@ -348,19 +356,22 @@ function resolveMarket(allPlayers, market, quarter, extraUnclaimed = 0) {
     const rawNewFromUnclaimed = Math.floor(unclaimed * myShare * 0.15 * phase.growthBonus);
     const newFromUnclaimed = unclaimed > 0 ? Math.max(1, rawNewFromUnclaimed) : 0;
 
-    // 競合からの奪取（スコア差 + 価格差ボーナス）
+    // 競合からの奪取（スコア差 + 価格差ボーナス + 営業力ボーナス）
     let stolenFromRivals = 0;
     allPlayers.forEach((rival, j) => {
       if (i === j || rival.ops.stores === 0) return;
       const diff = myScore - scores[j];
       if (diff > 0) {
         let rate = Math.min(0.20, (diff / Math.max(scores[j], 1)) * 0.25 * phase.stealMultiplier);
-        // ★ 自分が安く相手が高い場合：価格差に応じて追加奪取
+        // ★ 営業力ボーナス：salesPowerが高いほど奪取率に上乗せ（スコア差に関係なく効く）
+        const salesBonus = (player.ops.salesPower / 150) * 0.08;
+        rate = Math.min(0.35, rate + salesBonus);
+        // ★ 価格差ボーナス
         const myPrice = player.ops.setPrice || market.arpu;
         const rivalPrice = rival.ops.setPrice || market.arpu;
         if (myPrice < rivalPrice) {
           const priceDiffRatio = (rivalPrice - myPrice) / rivalPrice;
-          rate = Math.min(0.30, rate + priceDiffRatio * (market.priceSensitivity || 0.6) * 0.4);
+          rate = Math.min(0.40, rate + priceDiffRatio * (market.priceSensitivity || 0.6) * 0.4);
         }
         stolenFromRivals += Math.floor(rival.ops.stores * rate);
       }
@@ -1290,11 +1301,10 @@ function TutorialScreen({ onComplete }) {
         <div>
           <div style={{display:"grid",gap:8,marginBottom:14}}>
             {[
-              {icon:"👥",name:"営業力",      color:"#06B6D4",desc:"新規獲得ペースに直結",bar:70},
+              {icon:"👥",name:"営業力",        color:"#06B6D4",desc:"新規獲得ペースに直結",bar:70},
               {icon:"⚙️",name:"プロダクト品質",color:"#A855F7",desc:"解約率を下げる・競争スコアに寄与",bar:55},
-              {icon:"📢",name:"ブランド認知", color:"#E3B341",desc:"シェア獲得を加速。未投資で最も劣化",bar:40},
-              {icon:"💴",name:"価格競争力",   color:"#3FB950",desc:"低価格ほど高い。年次価格設定でも変動",bar:60},
-              {icon:"🎧",name:"CS品質",       color:"#FFA657",desc:"解約率を下げる。長期保有に重要",bar:50},
+              {icon:"📢",name:"ブランド認知",   color:"#E3B341",desc:"シェア獲得を加速。未投資で最も劣化",bar:40},
+              {icon:"🎧",name:"CS品質",         color:"#FFA657",desc:"解約率を下げる。長期保有に重要",bar:50},
             ].map(p=>(
               <div key={p.name} style={{display:"flex",gap:10,alignItems:"center",background:C.panel,borderRadius:8,padding:"8px 12px"}}>
                 <span style={{fontSize:18,flexShrink:0}}>{p.icon}</span>
@@ -1341,9 +1351,9 @@ function TutorialScreen({ onComplete }) {
             </div>
             <div style={{background:`linear-gradient(to right, ${C.green}, ${C.cyan}, ${C.yellow})`,height:6,borderRadius:3,marginBottom:10}}/>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,fontSize:10,color:C.muted,textAlign:"center"}}>
-              <div>シェア獲得⬆<br/>ARPU⬇</div>
+              <div>競争スコア⬆<br/>ARPU⬇</div>
               <div>バランス型</div>
-              <div>ARPU⬆<br/>解約リスク⬆</div>
+              <div>ARPU⬆<br/>競争スコア⬇<br/>解約リスク⬆</div>
             </div>
           </div>
 
@@ -1428,8 +1438,9 @@ function PriceSettingScreen({ pendingPrice, onConfirm }) {
   const { baseArpu, currentPrice, currentStores, priceSensitivity, isInitial } = pendingPrice;
   const [inputPrice, setInputPrice] = useState(currentPrice || baseArpu);
   const multiplier = calcPriceMultiplier(inputPrice, baseArpu);
-  // 価格スコア（competitiveScoreと同じ計算）
-  const priceScore = Math.max(0, Math.min(100, 50 - (inputPrice - baseArpu) / Math.max(baseArpu, 1) * 100));
+  // 価格スコア（competitiveScoreと同じ二乗カーブ）
+  const _ratio = (inputPrice - baseArpu) / Math.max(baseArpu, 1);
+  const priceScore = Math.max(0, Math.min(100, 50 - Math.sign(_ratio) * Math.pow(Math.abs(_ratio), 0.5) * 80));
   const revenueChangePct = ((multiplier - 1.0) * 100).toFixed(1);
   const hikeRatio = isInitial ? 0 : (inputPrice - currentPrice) / Math.max(currentPrice, 1);
   const churnStores = (!isInitial && hikeRatio > 0) ? Math.floor((currentStores||0) * hikeRatio * (priceSensitivity||0.6)) : 0;
@@ -2161,7 +2172,7 @@ export default function App() {
       if (churnStores > 0) {
         churnMessage = {
           icon: "📤", color: "#F85149",
-          text: `値上げ（+${(hikeRatio*100).toFixed(0)}%）により ${churnStores}店が解約。市場での価格競争力も低下します。`,
+          text: `値上げ（+${(hikeRatio*100).toFixed(0)}%）により ${churnStores}店が解約。競争スコアも低下します。`,
         };
       }
     }
@@ -2271,12 +2282,12 @@ export default function App() {
                       {choice.permanentOpex&&<span style={{fontSize:11,background:`${C.orange}22`,color:C.orange,padding:"2px 10px",borderRadius:20}}>固定費+{choice.permanentOpex}万/Q</span>}
                       {choice.opsBoost&&Object.entries(choice.opsBoost).map(([k,v])=>(
                         <span key={k} style={{fontSize:11,background:`${C.cyan}22`,color:C.cyan,padding:"2px 10px",borderRadius:20}}>
-                          {({salesPower:"営業力",solutionQuality:"品質",brandAwareness:"ブランド",priceCompetitiveness:"価格",supportQuality:"CS"})[k]||k}+{v}
+                          {({salesPower:"営業力",solutionQuality:"品質",brandAwareness:"ブランド",supportQuality:"CS"})[k]||k}+{v}
                         </span>
                       ))}
                       {choice.opsRisk&&Object.entries(choice.opsRisk).filter(([k])=>k!=="randomParam"&&k!=="storeRatio").map(([k,v])=>(
                         <span key={k} style={{fontSize:11,background:`${C.red}22`,color:C.red,padding:"2px 10px",borderRadius:20}}>
-                          {({salesPower:"営業力",solutionQuality:"品質",brandAwareness:"ブランド",priceCompetitiveness:"価格",supportQuality:"CS"})[k]||k}{v}
+                          {({salesPower:"営業力",solutionQuality:"品質",brandAwareness:"ブランド",supportQuality:"CS"})[k]||k}{v}
                         </span>
                       ))}
                       {choice.cashGain&&<span style={{fontSize:11,background:`${C.green}22`,color:C.green,padding:"2px 10px",borderRadius:20}}>現金+{choice.cashGain}万</span>}
