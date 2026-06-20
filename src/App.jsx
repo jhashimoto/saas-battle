@@ -801,11 +801,14 @@ function BudgetAllocator({ availableBudget, allocation, onChange, bs, playerType
               <input
                 type="range" min={0} max={availableBudget} step={10} value={val}
                 onChange={e => setItem(item.id, Number(e.target.value))}
+                onTouchStart={e => e.stopPropagation()}
+                onTouchMove={e => e.stopPropagation()}
                 style={{
-                  width:"100%", height:4, cursor:"pointer", accentColor: item.color,
+                  width:"100%", height:28, cursor:"pointer", accentColor: item.color,
                   background:`linear-gradient(to right, ${item.color} ${val/Math.max(availableBudget,1)*100}%, #30363D ${val/Math.max(availableBudget,1)*100}%)`,
                   borderRadius:2, outline:"none", border:"none",
                   WebkitAppearance:"none", appearance:"none",
+                  touchAction:"pan-x",
                 }}
               />
               <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:C.muted,marginTop:2}}>
@@ -1479,6 +1482,7 @@ function PriceSettingScreen({ pendingPrice, onConfirm }) {
           <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
             <span style={{fontSize:16,color:C.muted,flexShrink:0}}>¥</span>
             <input type="number" value={inputPrice} min={1}
+              inputMode="numeric" pattern="[0-9]*"
               onChange={e => setInputPrice(Math.max(1, Number(e.target.value)))}
               style={{flex:1,background:C.bg,border:`2px solid ${C.cyan}`,borderRadius:8,
                 padding:"12px 16px",color:C.text,fontSize:24,fontWeight:900,
@@ -2140,20 +2144,21 @@ export default function App() {
       return;
     }
     if (quarter >= MAX_QUARTERS) { setScreen("gameover"); return; }
-    // yearreview判定：現在のQ（result画面）が4の倍数なら年末
     if (quarter % 4 === 0) { setScreen("yearreview"); return; }
+    // ★ yearreview後にconfirmPriceでquarterが既に進んでいる場合はここでは進めない
+    // （screen="play"から"result"になった時点のquarterで判定するため問題なし）
     setQuarter(q => q + 1); setScreen("play"); setTab("budget");
   }
 
   function advanceFromYearReview() {
     const market = MARKETS[marketId];
-    // ★ yearreview終了時にquarterを進める（Q4→Q5、Q8→Q9）
-    setQuarter(q => q + 1);
+    const nextQ = quarter + 1; // ★ 非同期stateに依存しないよう値を先に計算
     setPendingPrice({
       currentPrice: ops.setPrice || market?.arpu || 80,
       baseArpu: market?.arpu || 80,
       currentStores: ops.stores || 0,
       priceSensitivity: market?.priceSensitivity || 0.6,
+      nextQuarter: nextQ, // ★ confirmPriceで確実にセットするためここで渡す
     });
     setScreen("pricesetting");
   }
@@ -2164,7 +2169,6 @@ export default function App() {
     const prevPrice = pendingPrice?.isInitial ? newPrice : (ops.setPrice || baseArpu);
     const multiplier = calcPriceMultiplier(newPrice, baseArpu);
 
-    // 初回は解約なし。値上げ時のみ解約発生
     const hikeRatio = pendingPrice?.isInitial ? 0 : (newPrice - prevPrice) / Math.max(prevPrice, 1);
     let churnStores = 0;
     let churnMessage = null;
@@ -2186,10 +2190,13 @@ export default function App() {
       stores: Math.max(0, (o.stores||0) - churnStores),
     }));
     if (churnMessage) setNarratives([churnMessage]);
-    setPendingPrice(null);
 
-    // ★ quarterは advance() で管理するためここでは進めない
-    // yearreview → pricesetting → play の流れでは setQuarter は不要
+    // ★ yearreview後はnextQuarterを使って確実にquarterをセット
+    // （setQuarter(q=>q+1)の非同期による競合状態を回避）
+    if (pendingPrice?.nextQuarter) {
+      setQuarter(pendingPrice.nextQuarter);
+    }
+    setPendingPrice(null);
     setScreen("play");
     setTab("budget");
   }

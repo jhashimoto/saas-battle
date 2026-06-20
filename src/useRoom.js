@@ -1,20 +1,15 @@
 import { useState, useEffect, useCallback } from "react";
 import { db } from "./firebase.js";
-import {
-  ref, set, get, update, onValue, off, serverTimestamp
-} from "firebase/database";
+import { ref, set, get, update, onValue, off, serverTimestamp } from "firebase/database";
 
-// ★ バージョンを上げるたびに古いlocalStorageが自動無効化される
-const GAME_VERSION = "1.4";
+const GAME_VERSION = "1.5";
 const STORAGE_KEY = `saas_battle_room_v${GAME_VERSION}`;
 const TUTORIAL_KEY = `saas_tutorial_done_v${GAME_VERSION}`;
 
-// 古いバージョンのキャッシュを全消去
 function clearOldVersionCache() {
   try {
     Object.keys(localStorage).forEach(key => {
-      if ((key.startsWith("saas_battle_room") || key.startsWith("saas_tutorial_done"))
-          && key !== STORAGE_KEY && key !== TUTORIAL_KEY) {
+      if ((key.startsWith("saas_battle_room") || key.startsWith("saas_tutorial_done")) && key !== STORAGE_KEY && key !== TUTORIAL_KEY) {
         localStorage.removeItem(key);
       }
     });
@@ -29,11 +24,7 @@ function generateRoomCode() {
 }
 
 function saveRoomToStorage(roomCode, playerId, isHost) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      roomCode, playerId, isHost, savedAt: Date.now(), version: GAME_VERSION
-    }));
-  } catch(e) {}
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ roomCode, playerId, isHost, savedAt: Date.now(), version: GAME_VERSION })); } catch(e) {}
 }
 
 function loadRoomFromStorage() {
@@ -43,7 +34,6 @@ function loadRoomFromStorage() {
     if (!s) return null;
     const d = JSON.parse(s);
     if (d.version !== GAME_VERSION) { localStorage.removeItem(STORAGE_KEY); return null; }
-    // 6時間以上経過したら無効（古すぎるルーム情報は使わない）
     if (Date.now() - d.savedAt > 6 * 60 * 60 * 1000) { localStorage.removeItem(STORAGE_KEY); return null; }
     return d;
   } catch(e) { return null; }
@@ -57,23 +47,19 @@ export { GAME_VERSION, TUTORIAL_KEY, clearRoomStorage };
 
 export function useRoom() {
   const saved = loadRoomFromStorage();
-  const [roomCode, setRoomCode]   = useState(saved?.roomCode || null);
-  const [playerId, setPlayerId]   = useState(saved?.playerId || null);
-  const [isHost, setIsHost]       = useState(saved?.isHost || false);
-  const [roomData, setRoomData]   = useState(null);
-  const [error, setError]         = useState(null);
-  const [loading, setLoading]     = useState(false);
+  const [roomCode, setRoomCode] = useState(saved?.roomCode || null);
+  const [playerId, setPlayerId] = useState(saved?.playerId || null);
+  const [isHost, setIsHost] = useState(saved?.isHost || false);
+  const [roomData, setRoomData] = useState(null);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     if (!roomCode) return;
     const roomRef = ref(db, `rooms/${roomCode}`);
     onValue(roomRef, (snap) => {
-      if (snap.exists()) {
-        setRoomData(snap.val());
-      } else {
-        setRoomData(null);
-        clearRoomStorage();
-      }
+      if (snap.exists()) setRoomData(snap.val());
+      else { setRoomData(null); clearRoomStorage(); }
     });
     return () => off(roomRef);
   }, [roomCode]);
@@ -89,21 +75,14 @@ export function useRoom() {
       }
       const pid = `p_${Date.now()}`;
       await set(ref(db, `rooms/${code}`), {
-        host: pid,
-        status: "waiting",
-        marketId,
-        quarter: 1,
-        version: GAME_VERSION,
+        host: pid, status: "waiting", marketId, quarter: 1, version: GAME_VERSION,
         createdAt: serverTimestamp(),
-        players: {
-          [pid]: { name: playerName, playerType, ready: false, isHost: true, joinedAt: serverTimestamp() }
-        }
+        players: { [pid]: { name: playerName, playerType, ready: false, isHost: true, joinedAt: serverTimestamp() } }
       });
       setRoomCode(code); setPlayerId(pid); setIsHost(true);
       saveRoomToStorage(code, pid, true);
-    } catch (e) {
-      setError("ルームの作成に失敗しました: " + e.message);
-    } finally { setLoading(false); }
+    } catch(e) { setError("ルームの作成に失敗しました: " + e.message); }
+    finally { setLoading(false); }
   }, []);
 
   const joinRoom = useCallback(async (code, playerName, playerType) => {
@@ -117,35 +96,26 @@ export function useRoom() {
       const players = room.players || {};
       if (Object.keys(players).length >= 3) { setError("ルームが満員です（最大3人）"); setLoading(false); return; }
       const pid = `p_${Date.now()}`;
-      await update(ref(db, `rooms/${code}/players/${pid}`), {
-        name: playerName, playerType, ready: false, isHost: false, joinedAt: serverTimestamp(),
-      });
+      await update(ref(db, `rooms/${code}/players/${pid}`), { name: playerName, playerType, ready: false, isHost: false, joinedAt: serverTimestamp() });
       setRoomCode(code); setPlayerId(pid); setIsHost(false);
       saveRoomToStorage(code, pid, false);
-    } catch (e) {
-      setError("参加に失敗しました: " + e.message);
-    } finally { setLoading(false); }
+    } catch(e) { setError("参加に失敗しました: " + e.message); }
+    finally { setLoading(false); }
   }, []);
 
   const startGame = useCallback(async (initialStates) => {
     if (!isHost || !roomCode) return;
-    await update(ref(db, `rooms/${roomCode}`), {
-      status: "playing", quarter: 1, gameState: initialStates,
-    });
+    await update(ref(db, `rooms/${roomCode}`), { status: "playing", quarter: 1, gameState: initialStates });
   }, [isHost, roomCode]);
 
   const submitAllocation = useCallback(async (allocation, specialAction) => {
     if (!roomCode || !playerId) return;
-    await update(ref(db, `rooms/${roomCode}/players/${playerId}`), {
-      ready: true, allocation, specialAction: specialAction || null,
-    });
+    await update(ref(db, `rooms/${roomCode}/players/${playerId}`), { ready: true, allocation, specialAction: specialAction || null });
   }, [roomCode, playerId]);
 
   const writeQuarterResult = useCallback(async (newQuarter, gameState, quarterLogs, status = "result") => {
     if (!isHost || !roomCode) return;
-    await update(ref(db, `rooms/${roomCode}`), {
-      quarter: newQuarter, status, gameState, quarterLogs, lastUpdated: serverTimestamp(),
-    });
+    await update(ref(db, `rooms/${roomCode}`), { quarter: newQuarter, status, gameState, quarterLogs, lastUpdated: serverTimestamp() });
     const players = roomData?.players || {};
     const updates = {};
     Object.keys(players).forEach(pid => {
@@ -166,17 +136,11 @@ export function useRoom() {
     setRoomCode(null); setPlayerId(null); setIsHost(false); setRoomData(null);
   }, []);
 
-  const allReady = roomData?.players
-    ? Object.values(roomData.players).every(p => p.ready)
-    : false;
-
   return {
-    roomCode, roomData, playerId, isHost, error, loading, allReady,
-    createRoom, joinRoom, startGame, submitAllocation,
-    writeQuarterResult, advanceYear, leaveRoom,
+    roomCode, roomData, playerId, isHost, error, loading,
+    allReady: roomData?.players ? Object.values(roomData.players).every(p => p.ready) : false,
+    createRoom, joinRoom, startGame, submitAllocation, writeQuarterResult, advanceYear, leaveRoom,
     myPlayer: roomData?.players?.[playerId] || null,
-    players: roomData?.players
-      ? Object.entries(roomData.players).map(([id, p]) => ({...p, id}))
-      : [],
+    players: roomData?.players ? Object.entries(roomData.players).map(([id, p]) => ({...p, id})) : [],
   };
 }
