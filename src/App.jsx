@@ -1535,6 +1535,109 @@ function TutorialScreen({ onComplete }) {
 }
 
 
+// ============================================================
+// FORECAST SCREEN：決算予想クイズ
+// ============================================================
+function ForecastScreen({ pl, onReveal, onSkipFuture }) {
+  const [revInput, setRevInput] = useState("");
+  const [varInput, setVarInput] = useState("");
+  const [sgaInput, setSgaInput] = useState("");
+
+  const revNum = Number(revInput) || 0;
+  const varNum = Number(varInput) || 0;
+  const sgaNum = Number(sgaInput) || 0;
+  const predictedNI = revNum - varNum - sgaNum;
+
+  const allFilled = revInput !== "" && varInput !== "" && sgaInput !== "";
+
+  return (
+    <div style={bgBase}>
+      <div style={{maxWidth:520, margin:"0 auto", padding:"40px 20px"}}>
+        <div style={{textAlign:"center", marginBottom:24}}>
+          <div style={{fontSize:11,letterSpacing:4,color:C.purple,marginBottom:8}}>決算予想クイズ</div>
+          <h2 style={{fontSize:22,fontWeight:900,color:C.text,margin:"0 0 8px"}}>今期の決算を予想しよう</h2>
+          <p style={{fontSize:12,color:C.muted,lineHeight:1.6}}>
+            今期の配分・店舗数の動きを思い出して、PLの数字を予想してみよう。<br/>
+            純利益は自動計算されます。
+          </p>
+        </div>
+
+        <Panel style={{marginBottom:16}}>
+          {[
+            { label:"💰 売上高", hint:"店舗数 × 価格 で考えてみよう", value:revInput, setValue:setRevInput },
+            { label:"📉 変動費（原価+店舗コスト）", hint:"売上の約25% + 店舗数×コスト", value:varInput, setValue:setVarInput },
+            { label:"🏢 固定費（投資額+運営費）", hint:"今期配分した投資額 + 固定運営費", value:sgaInput, setValue:setSgaInput },
+          ].map((f) => (
+            <div key={f.label} style={{marginBottom:14}}>
+              <div style={{display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:4}}>
+                <label style={{fontSize:13, fontWeight:700, color:C.text}}>{f.label}</label>
+                <span style={{fontSize:10, color:C.muted}}>{f.hint}</span>
+              </div>
+              <div style={{display:"flex", alignItems:"center", gap:8}}>
+                <span style={{fontSize:14, color:C.muted}}>¥</span>
+                <input
+                  type="number" inputMode="numeric"
+                  value={f.value}
+                  onChange={e => f.setValue(e.target.value)}
+                  placeholder="0"
+                  style={{
+                    flex:1, background:C.bg, border:`2px solid ${C.border}`, borderRadius:8,
+                    padding:"10px 14px", color:C.text, fontSize:18, fontWeight:800,
+                    fontFamily:"'Courier New',monospace", outline:"none", textAlign:"right",
+                  }}
+                />
+                <span style={{fontSize:12, color:C.muted, flexShrink:0}}>万円</span>
+              </div>
+            </div>
+          ))}
+
+          {/* 純利益：自動計算で表示 */}
+          <div style={{
+            marginTop:18, paddingTop:14, borderTop:`1px dashed ${C.border}`,
+            display:"flex", justifyContent:"space-between", alignItems:"center",
+          }}>
+            <span style={{fontSize:13, fontWeight:700, color:C.text}}>📊 予想純利益（自動計算）</span>
+            <span style={{
+              fontSize:20, fontWeight:900, fontFamily:"'Courier New',monospace",
+              color: predictedNI >= 0 ? C.green : C.red,
+            }}>
+              {predictedNI >= 0 ? "+" : ""}{predictedNI.toLocaleString()}万
+            </span>
+          </div>
+        </Panel>
+
+        <button
+          onClick={() => onReveal({ revenue:revNum, varCost:varNum, sga:sgaNum, netIncome:predictedNI })}
+          disabled={!allFilled}
+          style={{
+            width:"100%", padding:16, borderRadius:10, fontSize:15, fontWeight:700, letterSpacing:2,
+            border:"none", cursor: allFilled ? "pointer" : "not-allowed",
+            background: allFilled ? `linear-gradient(135deg,#006080,${C.cyan})` : C.border,
+            color: allFilled ? "#fff" : C.muted,
+          }}>
+          決算を確認する 📖
+        </button>
+
+        {/* スキップ：目立たせない */}
+        <div style={{textAlign:"center", marginTop:14, display:"flex", justifyContent:"center", gap:16}}>
+          <button onClick={() => onReveal(null)} style={{
+            background:"none", border:"none", color:C.muted, fontSize:11,
+            cursor:"pointer", opacity:0.6, textDecoration:"underline",
+          }}>
+            予想せず結果を見る
+          </button>
+          <button onClick={() => { onSkipFuture(); onReveal(null); }} style={{
+            background:"none", border:"none", color:C.muted, fontSize:11,
+            cursor:"pointer", opacity:0.4, textDecoration:"underline",
+          }}>
+            今後表示しない
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PriceSettingScreen({ pendingPrice, onConfirm }) {
   const { baseArpu, currentPrice, currentStores, priceSensitivity, isInitial } = pendingPrice;
   const [inputPrice, setInputPrice] = useState(currentPrice || baseArpu);
@@ -1832,6 +1935,8 @@ export default function App() {
   const [activeEffects,setActiveEffects]   = useState([]);
   const [permanentOpexExtra,setPermanentOpexExtra] = useState(0);
   const [pendingPrice,setPendingPrice]     = useState(null); // 年次価格設定待ち
+  const [pendingResult,setPendingResult]   = useState(null); // 決算予想クイズ待ちの結果データ
+  const [forecastSkip,setForecastSkip]     = useState(false); // 予想クイズをスキップする設定
   const [tab,setTab]             = useState("budget");
   const [history,setHistory]     = useState([]);
 
@@ -2210,7 +2315,7 @@ export default function App() {
     setLastNetIncome(pl.netIncome); setNarratives(newNarratives);
     setActiveEffects(newActiveEffects);
     setPrevAllocation(allocation); setAllocation({...allocation}); setSpecialAction(null);
-    setScreen("result");
+    goToResultOrForecast(pl);
   }
 
   // 選択型イベントの確定
@@ -2219,7 +2324,7 @@ export default function App() {
     const choice = pendingChoice.choices[choiceIdx];
     let newBs = {...bs}, newOps = {...ops};
 
-    if (choice.effect === "none") { setBs(newBs); setOps(newOps); setPendingChoice(null); setScreen("result"); return; }
+    if (choice.effect === "none") { setBs(newBs); setOps(newOps); setPendingChoice(null); goToResultOrForecast(lastPL); return; }
     if (choice.bsCost)      newBs = {...newBs, cash: newBs.cash - choice.bsCost};
     if (choice.cashGain)    newBs = {...newBs, cash: newBs.cash + choice.cashGain};
     if (choice.capitalGain) newBs = {...newBs, capital: newBs.capital + choice.capitalGain};
@@ -2232,7 +2337,7 @@ export default function App() {
     }
     setBs(newBs); setOps(newOps);
     setPendingChoice(null);
-    setScreen("result");
+    goToResultOrForecast(lastPL);
   }
 
   function advance() {
@@ -2246,6 +2351,16 @@ export default function App() {
     // ★ yearreview後にconfirmPriceでquarterが既に進んでいる場合はここでは進めない
     // （screen="play"から"result"になった時点のquarterで判定するため問題なし）
     setQuarter(q => q + 1); setScreen("play"); setTab("budget");
+  }
+
+  // 決算予想クイズへ進むか、直接結果画面へ行くか分岐
+  function goToResultOrForecast(pl) {
+    if (forecastSkip) {
+      setScreen("result");
+      return;
+    }
+    setPendingResult(pl);
+    setScreen("forecast");
   }
 
   function advanceFromYearReview() {
@@ -2415,6 +2530,21 @@ export default function App() {
   // PRICE SETTING SCREEN（年次レビュー後）
   if (screen === "pricesetting" && pendingPrice) {
     return <PriceSettingScreen pendingPrice={pendingPrice} onConfirm={confirmPrice} />;
+  }
+
+  // FORECAST SCREEN（決算予想クイズ）
+  if (screen === "forecast" && pendingResult) {
+    return (
+      <ForecastScreen
+        pl={pendingResult}
+        onSkipFuture={() => setForecastSkip(true)}
+        onReveal={(prediction) => {
+          setLastPL(prev => prev ? { ...prev, prediction } : prev);
+          setPendingResult(null);
+          setScreen("result");
+        }}
+      />
+    );
   }
 
   // YEAR REVIEW SCREEN
@@ -2706,6 +2836,46 @@ export default function App() {
               </div>
             );
           })()}
+
+          {/* 決算予想クイズの答え合わせ */}
+          {lastPL.prediction && (
+            <Panel style={{marginBottom:14}}>
+              <Label style={{display:"block",marginBottom:10}}>🎯 予想 vs 実際</Label>
+              <div style={{display:"grid", gap:8}}>
+                {[
+                  { label:"売上高", predicted:lastPL.prediction.revenue, actual:lastPL.revenue },
+                  { label:"変動費", predicted:lastPL.prediction.varCost, actual:lastPL.cogs + lastPL.varCost },
+                  { label:"固定費", predicted:lastPL.prediction.sga, actual:lastPL.allocSga + (lastPL.sgaAdd||0) + lastPL.opex },
+                  { label:"純利益", predicted:lastPL.prediction.netIncome, actual:lastPL.netIncome },
+                ].map(row => {
+                  const diff = row.actual - row.predicted;
+                  const errRate = row.actual !== 0 ? Math.abs(diff / row.actual) * 100 : (diff === 0 ? 0 : 100);
+                  const badge = errRate <= 5 ? { icon:"🎯", label:"的中", color:C.green }
+                              : errRate <= 20 ? { icon:"👍", label:"近い", color:C.cyan }
+                              : { icon:"🤔", label:"ズレ大", color:C.orange };
+                  return (
+                    <div key={row.label} style={{
+                      display:"flex", alignItems:"center", gap:10,
+                      background:C.bg, borderRadius:8, padding:"8px 12px", border:`1px solid ${C.border}`,
+                    }}>
+                      <span style={{fontSize:11, color:C.muted, width:56, flexShrink:0}}>{row.label}</span>
+                      <div style={{flex:1, display:"flex", gap:8, fontSize:11, fontFamily:"'Courier New',monospace"}}>
+                        <span style={{color:C.muted}}>予想¥{row.predicted.toLocaleString()}</span>
+                        <span style={{color:C.border}}>→</span>
+                        <span style={{color:C.text, fontWeight:700}}>実際¥{row.actual.toLocaleString()}</span>
+                      </div>
+                      <span style={{
+                        fontSize:10, fontWeight:700, color:badge.color,
+                        background:`${badge.color}18`, padding:"2px 8px", borderRadius:20, flexShrink:0,
+                      }}>
+                        {badge.icon} {badge.label}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </Panel>
+          )}
 
           <PLTable pl={lastPL}/>
 
