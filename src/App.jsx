@@ -626,6 +626,104 @@ function generateCompetitiveNarrative(competResult, npcs, prevNpcOps, phase) {
 }
 
 // マーケットシェア円グラフ（SVG）- NaN%バグ修正版
+// ============================================================
+// 数字カウントアップ表示（0→targetへアニメーション）
+// ============================================================
+function CountUpNumber({ target, duration=800, prefix="", suffix="", color, svgMode=false }) {
+  const [display, setDisplay] = useState(0);
+  useEffect(() => {
+    let startTime = null;
+    let raf;
+    function step(ts) {
+      if (!startTime) startTime = ts;
+      const progress = Math.min(1, (ts - startTime) / duration);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      setDisplay(Math.floor(eased * target));
+      if (progress < 1) raf = requestAnimationFrame(step);
+    }
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [target, duration]);
+  if (svgMode) return <>{prefix}{display}{suffix}</>;
+  return <span style={{color}}>{prefix}{display}{suffix}</span>;
+}
+
+// ============================================================
+// 戦況バトルカード：Q結果を視覚的に演出
+// ============================================================
+function BattleResultCard({ competResult, prevStores, finalStores }) {
+  const cr = competResult || {};
+  const newU = cr.newFromUnclaimed || 0;
+  const stolen = cr.stolenFromRivals || 0;
+  const churn = cr.naturalChurn || 0;
+  const lost = cr.lostToRivals || 0;
+  const netChange = finalStores - prevStores;
+  const isPositive = netChange >= 0;
+
+  const events = [
+    newU > 0 && { icon:"🌱", label:"新規開拓", value:newU, color:C.green, sign:"+" },
+    stolen > 0 && { icon:"⚔️", label:"競合から奪取", value:stolen, color:C.cyan, sign:"+" },
+    churn > 0 && { icon:"💔", label:"自然解約", value:churn, color:C.orange, sign:"-" },
+    lost > 0 && { icon:"📤", label:"競合に流出", value:lost, color:C.red, sign:"-" },
+  ].filter(Boolean);
+
+  return (
+    <Panel style={{marginBottom:14, overflow:"hidden", position:"relative"}}>
+      <Label style={{display:"block",marginBottom:12}}>⚔️ 今期の戦況</Label>
+
+      <div className="sb-popin" style={{
+        textAlign:"center", padding:"16px 0", marginBottom:14,
+        background: isPositive ? `${C.green}10` : `${C.red}10`,
+        border: `1px solid ${isPositive ? C.green : C.red}33`,
+        borderRadius:12,
+      }}>
+        <div style={{fontSize:11, color:C.muted, marginBottom:4}}>店舗数の変化</div>
+        <div style={{fontSize:36, fontWeight:900, fontFamily:"'Courier New',monospace"}}>
+          <CountUpNumber
+            target={Math.abs(netChange)}
+            prefix={isPositive ? "+" : "-"}
+            suffix="店"
+            color={isPositive ? C.green : C.red}
+            duration={900}
+          />
+        </div>
+        <div style={{fontSize:12, color:C.muted, marginTop:4}}>
+          {prevStores}店 → <CountUpNumber target={finalStores} duration={900} color={C.text}/>店
+        </div>
+      </div>
+
+      <div style={{display:"grid", gap:8}}>
+        {events.map((ev, i) => (
+          <div key={ev.label} style={{
+            display:"flex", alignItems:"center", gap:10,
+            opacity:0,
+            animation:`slideInRight 0.4s ease-out ${i*0.12}s forwards`,
+          }}>
+            <span style={{fontSize:18, flexShrink:0}}>{ev.icon}</span>
+            <span style={{fontSize:12, color:C.muted, width:88, flexShrink:0}}>{ev.label}</span>
+            <div style={{flex:1, height:8, background:C.border, borderRadius:4, overflow:"hidden", position:"relative"}}>
+              <div className="sb-bar-fill" style={{
+                height:"100%",
+                width:`${Math.min(100, ev.value*4)}%`,
+                background: ev.color,
+                borderRadius:4,
+              }}/>
+            </div>
+            <span style={{fontSize:13, fontWeight:800, color:ev.color, width:42, textAlign:"right", flexShrink:0, fontFamily:"'Courier New',monospace"}}>
+              {ev.sign}{ev.value}
+            </span>
+          </div>
+        ))}
+        {events.length === 0 && (
+          <div style={{textAlign:"center", fontSize:12, color:C.muted, padding:"8px 0"}}>
+            大きな変動はありませんでした
+          </div>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
 function MarketShareChart({ players, market, quarter }) {
   const totalAvail = Math.floor(market.totalStores * marketPenetration(quarter));
   // ★ storesを必ず整数に正規化してNaN伝播を防ぐ
@@ -655,12 +753,14 @@ function MarketShareChart({ players, market, quarter }) {
     <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
       <svg width={160} height={160} style={{ flexShrink: 0 }}>
         {paths.map((seg, i) => (
-          <path key={i} d={seg.path} fill={seg.color}
+          <path key={`${quarter}-${i}`} className="sb-pie-seg" d={seg.path} fill={seg.color}
             stroke={seg.isPlayer ? "#fff" : "transparent"} strokeWidth={seg.isPlayer ? 2 : 0}
             opacity={seg.label === "未獲得" ? 0.3 : 0.9} />
         ))}
         <circle cx={cx} cy={cy} r={28} fill="#161B22" />
-        <text x={cx} y={cy - 6} textAnchor="middle" fill="#F0F6FC" fontSize={11} fontWeight={700}>{totalStores}店</text>
+        <text x={cx} y={cy - 6} textAnchor="middle" fill="#F0F6FC" fontSize={11} fontWeight={700}>
+          <CountUpNumber target={totalStores} duration={700} svgMode suffix="店"/>
+        </text>
         <text x={cx} y={cy + 8} textAnchor="middle" fill="#8B949E" fontSize={9}>獲得済</text>
       </svg>
       <div style={{ flex: 1, display: "grid", gap: 6 }}>
@@ -716,8 +816,6 @@ const PhaseTag = ({phase}) => (
 );
 
 // ============================================================
-// BUDGET ALLOCATOR COMPONENT
-// =// ============================================================
 // BUDGET ALLOCATOR — スライダーUI + 前回値保持
 // ============================================================
 function BudgetAllocator({ availableBudget, allocation, onChange, bs, playerType, ops }) {
@@ -2611,22 +2709,12 @@ export default function App() {
 
           <PLTable pl={lastPL}/>
 
-          {/* 競争内訳 */}
-          <Panel style={{marginTop:14}}>
-            <Label style={{display:"block",marginBottom:10}}>今Q 競争結果の内訳</Label>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8,marginBottom:10}}>
-              {[["🆕 未開拓から獲得",`+${cr?.newFromUnclaimed||0}店`,"#3FB950"],
-                ["⚔️ 競合から奪取",`+${cr?.stolenFromRivals||0}店`,"#00C8D4"],
-                ["💔 自然解約",`-${cr?.naturalChurn||0}店`,"#F85149"],
-                ["🏳️ 競合に奪われた",`-${cr?.lostToRivals||0}店`,"#FFA657"],
-              ].map(([l,v,c])=>(
-                <div key={l} style={{background:"#0D1117",borderRadius:8,padding:"8px 12px",display:"flex",justifyContent:"space-between",border:`1px solid ${C.border}`}}>
-                  <span style={{fontSize:11,color:"#8B949E"}}>{l}</span>
-                  <span style={{fontSize:13,fontWeight:800,color:c,fontFamily:"'Courier New',monospace"}}>{v}</span>
-                </div>
-              ))}
-            </div>
-          </Panel>
+          {/* 競争内訳：アニメーション演出版 */}
+          <BattleResultCard
+            competResult={cr}
+            prevStores={Math.max(0, Math.floor((ops.stores||0) - (cr?.newFromUnclaimed||0) - (cr?.stolenFromRivals||0) + (cr?.naturalChurn||0) + (cr?.lostToRivals||0)))}
+            finalStores={Math.floor(ops.stores)||0}
+          />
 
           {/* 競合の動向（スコア変化付き）*/}
           <Panel style={{marginTop:14}}>
@@ -2688,6 +2776,23 @@ export default function App() {
                                         : <span style={{color:"#3FB950"}}> ({scoreDiff.toFixed(0)})</span>}
                       </div>
                     </div>
+                  </div>
+                  {/* スコア比較バー：自分 vs このNPC */}
+                  <div style={{marginTop:8, display:"flex", alignItems:"center", gap:6}}>
+                    <span style={{fontSize:9, color:C.cyan, width:20, flexShrink:0}}>You</span>
+                    <div style={{flex:1, height:6, background:C.border, borderRadius:3, overflow:"hidden", display:"flex"}}>
+                      <div className="sb-bar-fill" style={{
+                        height:"100%",
+                        width: `${(myScore/(myScore+nScore))*100}%`,
+                        background: C.cyan, borderRadius:"3px 0 0 3px",
+                      }}/>
+                      <div className="sb-bar-fill" style={{
+                        height:"100%",
+                        width: `${(nScore/(myScore+nScore))*100}%`,
+                        background: n.color, borderRadius:"0 3px 3px 0",
+                      }}/>
+                    </div>
+                    <span style={{fontSize:9, color:n.color, width:20, flexShrink:0, textAlign:"right"}}>{n.name.slice(0,2)}</span>
                   </div>
                 </div>
               );
