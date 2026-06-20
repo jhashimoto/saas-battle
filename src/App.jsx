@@ -1036,11 +1036,11 @@ function BSTable({bs}) {
 function PLBuildAnimation({ pl, quarter }) {
   const [step, setStep] = useState(0);
 
-  // 表示する行（PLTableと対応。小計を都度計算）
+  // 表示する行（小計を都度計算）
   const rows = [
     { label:"売上高",        value: pl.revenue,        kind:"plus" },
     { label:"売上原価",      value: -pl.cogs,          kind:"minus" },
-    { label:"売上総利益",    value: null,               kind:"subtotal" }, // 計算後に挿入
+    { label:"売上総利益",    value: null,               kind:"subtotal" },
     { label:"予算投資費用",  value: -pl.allocSga,      kind:"minus", skip: pl.allocSga === 0 },
     { label:"特別アクション費", value: -(pl.sgaAdd||0), kind:"minus", skip: !pl.sgaAdd },
     { label:"店舗変動費",    value: -pl.varCost,       kind:"minus" },
@@ -1051,31 +1051,46 @@ function PLBuildAnimation({ pl, quarter }) {
     { label:"当期純利益",    value: pl.netIncome,      kind:"final" },
   ].filter(r => !r.skip);
 
-  // 小計を埋め込む
   let running = 0;
   const computedRows = rows.map(r => {
     if (r.kind === "subtotal" || r.kind === "final") {
-      return { ...r, value: running, display: running };
+      return { ...r, display: running };
     }
     running += r.value;
     return { ...r, display: r.value };
   });
-  // 最後の行（純利益）は実際のnetIncomeで上書き（誤差防止）
-  computedRows[computedRows.length-1].display = pl.netIncome;
+  if (computedRows.length > 0) {
+    computedRows[computedRows.length-1].display = pl.netIncome;
+  }
+  const totalSteps = computedRows.length;
 
+  // ★ pl自体（netIncomeの値）が変わるたびに必ずリセットする。
+  //   quarterだけに依存すると同一Q内での再表示時にアニメーションが動かない
   useEffect(() => {
     setStep(0);
+    if (totalSteps === 0) return;
+    let current = 0;
     const timer = setInterval(() => {
-      setStep(s => {
-        if (s >= computedRows.length) { clearInterval(timer); return s; }
-        return s + 1;
-      });
+      current += 1;
+      setStep(current);
+      if (current >= totalSteps) clearInterval(timer);
     }, 420);
     return () => clearInterval(timer);
-  }, [quarter]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pl.netIncome, pl.revenue, quarter, totalSteps]);
 
   const visibleRows = computedRows.slice(0, step);
-  const isDone = step >= computedRows.length;
+  const isDone = step >= totalSteps;
+
+  // ★ 行が1つもない場合のガード（データ欠損時に真っ白にならないように）
+  if (totalSteps === 0) {
+    return (
+      <Panel style={{marginBottom:14}}>
+        <Label style={{display:"block",marginBottom:10}}>📋 決算</Label>
+        <div style={{fontSize:12, color:C.muted}}>データを準備中...</div>
+      </Panel>
+    );
+  }
 
   return (
     <Panel style={{marginBottom:14}}>
@@ -1100,9 +1115,8 @@ function PLBuildAnimation({ pl, quarter }) {
               padding: isSubtotal ? "8px 0" : "5px 0",
               borderTop: isSubtotal ? `1px solid ${C.border}` : "none",
               borderBottom: isSubtotal ? `1px solid ${C.border}` : `1px dashed ${C.border}55`,
-              opacity:0,
+              opacity: isLast ? 0 : 1,
               animation: isLast ? "slideInRight 0.35s ease-out forwards" : "none",
-              animationFillMode:"forwards",
             }}>
               <span style={{
                 fontSize: isSubtotal ? 12 : 11,
