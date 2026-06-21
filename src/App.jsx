@@ -120,12 +120,8 @@ const SPECIAL_ACTIONS = {
     desc:"急成長期限定。資本金+3000万。1回限り。ARRの約6ヶ月分。", cashGain:3000, capitalGain:3000, startupOnly:true, oneTime:true, cat:"funding", phase:"growth" },
   fund_series_b:{ id:"fund_series_b",icon:"🚀", name:"シリーズB調達",  cost:0,
     desc:"成熟期限定。資本金+8000万。1回限り。ARRの約12ヶ月分。", cashGain:8000, capitalGain:8000, startupOnly:true, oneTime:true, cat:"funding", phase:"mature" },
-  bank_loan:    { id:"bank_loan",    icon:"🏦", name:"銀行借入",        cost:0,
-    desc:"現預金+1000、負債+1000。利息5%/Q。負債/資本200%上限。", cashGain:1000, debtGain:1000, cat:"funding" },
-  bank_loan_lg: { id:"bank_loan_lg", icon:"🏛️", name:"大型銀行借入",   cost:0,
-    desc:"現預金+3000、負債+3000。急成長期以降のみ。利息5%/Q。", cashGain:3000, debtGain:3000, cat:"funding", phase:"growth" },
   debt_repay:   { id:"debt_repay",   icon:"💸", name:"借入一括返済",    cost:0,
-    desc:"負債を全額返済。利息負担から解放。", fullRepay:true, cat:"funding" },
+    desc:"借入を全額返済。利息負担から解放。", fullRepay:true, cat:"funding" },
 };
 
 // ============================================================
@@ -411,8 +407,15 @@ function applySpecialAction(bs, ops, actionId, usedActions) {
   }
   if (action.cashGain)    newBs.cash    += action.cashGain;
   if (action.capitalGain) newBs.capital += action.capitalGain;
-  if (action.debtGain)    newBs.debt    += action.debtGain;
-  if (action.fullRepay)   { newBs.cash -= newBs.debt; newBs.debt = 0; }
+  // ★ Stage3統合: debtGainはloanScheduleにも正しく登録する（cashは上のcashGainで既に加算済みなのでcashは増やさない）
+  if (action.debtGain) {
+    const quarterlyPrincipal = Math.ceil(action.debtGain / LOAN_TERM_QUARTERS);
+    newBs.debt += action.debtGain;
+    newBs.loanSchedule = [...(newBs.loanSchedule || []),
+      { principal: action.debtGain, remainingQuarters: LOAN_TERM_QUARTERS, quarterlyPrincipal }];
+  }
+  // ★ Stage3統合: fullRepayはloanScheduleも完全クリアする
+  if (action.fullRepay)   { newBs.cash -= newBs.debt; newBs.debt = 0; newBs.loanSchedule = []; }
   if (action.effects)      Object.entries(action.effects).forEach(([k,v]) => { newOps[k] = Math.min(100, newOps[k] + v); });
   if (action.storeBonus)   newOps.stores += action.storeBonus;
   if (action.priceDiscount && newOps.setPrice > 0) {
@@ -437,14 +440,19 @@ function resolveMarket(allPlayers, market, quarter, extraUnclaimed = 0) {
   const scores = allPlayers.map(p => competitiveScore(p.ops, baseArpu));
   const totalScore = scores.reduce((s, x) => s + x, 0);
 
+  // ★ Stage5: 結果への不確実性。乱数係数（中心1.0、範囲は項目ごとに変える）
+  // 同じ配分・同じスコアでも毎Q結果が多少ブレる「賭け」の感覚を出す
+  const rand = (spread) => 1 + (Math.random() - 0.5) * spread;
+
   return allPlayers.map((player, i) => {
     const myScore = scores[i];
     const myShare = totalScore > 0 ? myScore / totalScore : 1 / allPlayers.length;
 
-    const rawNewFromUnclaimed = Math.floor(unclaimed * myShare * 0.15 * phase.growthBonus);
+    // 新規獲得：±15%のブレ（市場の動きは完全に予測できない）
+    const rawNewFromUnclaimed = Math.floor(unclaimed * myShare * 0.15 * phase.growthBonus * rand(0.30));
     const newFromUnclaimed = unclaimed > 0 ? Math.max(1, rawNewFromUnclaimed) : 0;
 
-    // 競合からの奪取（スコア差 + 価格差ボーナス + 営業力ボーナス）
+    // 競合からの奪取（スコア差 + 価格差ボーナス + 営業力ボーナス）：±10%のブレ
     let stolenFromRivals = 0;
     allPlayers.forEach((rival, j) => {
       if (i === j || rival.ops.stores === 0) return;
@@ -461,11 +469,11 @@ function resolveMarket(allPlayers, market, quarter, extraUnclaimed = 0) {
           const priceDiffRatio = (rivalPrice - myPrice) / rivalPrice;
           rate = Math.min(0.40, rate + priceDiffRatio * (market.priceSensitivity || 0.6) * 0.4);
         }
-        stolenFromRivals += Math.floor(rival.ops.stores * rate);
+        stolenFromRivals += Math.floor(rival.ops.stores * rate * rand(0.20));
       }
     });
 
-    // 競合に奪われる（スコア差 + 価格差ペナルティ）
+    // 競合に奪われる（スコア差 + 価格差ペナルティ）：±10%のブレ
     let lostToRivals = 0;
     allPlayers.forEach((rival, j) => {
       if (i === j || player.ops.stores === 0) return;
@@ -479,13 +487,13 @@ function resolveMarket(allPlayers, market, quarter, extraUnclaimed = 0) {
           const priceDiffRatio = (myPrice - rivalPrice) / myPrice;
           rate = Math.min(0.30, rate + priceDiffRatio * (market.priceSensitivity || 0.6) * 0.4);
         }
-        lostToRivals += Math.floor(player.ops.stores * rate);
+        lostToRivals += Math.floor(player.ops.stores * rate * rand(0.20));
       }
     });
 
-    // 自然解約
+    // 自然解約：±10%のブレ
     const churnRate = calcChurn(player.ops);
-    const naturalChurn = Math.floor(player.ops.stores * churnRate);
+    const naturalChurn = Math.floor(player.ops.stores * churnRate * rand(0.20));
 
     const gained = newFromUnclaimed + stolenFromRivals;
     const lost   = naturalChurn + lostToRivals;
@@ -751,6 +759,307 @@ function CountUpNumber({ target, duration=800, prefix="", suffix="", color, svgM
 // ============================================================
 // 戦況バトルカード：Q結果を視覚的に演出
 // ============================================================
+// ============================================================
+// CHARACTER SPRITES：プレイヤー・NPCのドット絵キャラクター
+// mood: "normal" | "happy" | "worried"
+// ============================================================
+function CharacterSprite({ type, mood = "normal", scale = 1 }) {
+  if (type === "player") {
+    if (mood === "happy") return (
+      <g transform={`scale(${scale})`}>
+        <path d="M-20,-12 L-28,28 L-8,26 L-12,-8 Z" fill="#0E7A8A" transform="rotate(8 -15 8)"/>
+        <rect x="-15" y="30" width="11" height="20" fill="#1B2733" transform="rotate(-6 -10 40)"/>
+        <rect x="4" y="30" width="11" height="20" fill="#1B2733" transform="rotate(10 9 40)"/>
+        <path d="M-15,-14 L-32,-32 L-26,-38 L-9,-20 Z" fill="#00C8D4"/>
+        <path d="M15,-14 L32,-32 L26,-38 L9,-20 Z" fill="#00C8D4"/>
+        <rect x="22" y="-66" width="6" height="34" fill="#E9EEF3" transform="rotate(8 25 -49)"/>
+        <path d="M22,-66 L25,-72 L28,-66 Z" fill="#E9EEF3" transform="rotate(8 25 -49)"/>
+        <path d="M-26,-44 Q-32,-32 -26,-20 Q-20,-32 -26,-44 Z" fill="#00C8D4" transform="rotate(-15 -26 -32)"/>
+        <path d="M-22,-8 L-24,28 L24,28 L22,-8 Q0,-16 -22,-8 Z" fill="#00C8D4"/>
+        <path d="M-13,-16 Q0,-9 13,-16 L14,-8 Q0,-2 -14,-8 Z" fill="#F2A23C"/>
+        <circle cx="0" cy="-32" r="20" fill="#F4D1A8"/>
+        <path d="M-21,-34 Q-24,-54 0,-56 Q24,-54 21,-34 Q14,-44 6,-40 Q0,-46 -6,-40 Q-14,-44 -21,-34 Z" fill="#8B5A2B"/>
+        <path d="M-22,-42 Q0,-58 22,-42 Q22,-46 0,-50 Q-22,-46 -22,-42 Z" fill="#0E7A8A"/>
+        <circle cx="0" cy="-52" r="4" fill="#FFD166"/>
+        <path d="M-12,-30 Q-8,-26 -4,-30" stroke="#0D1117" strokeWidth="2.4" fill="none" strokeLinecap="round"/>
+        <path d="M4,-30 Q8,-26 12,-30" stroke="#0D1117" strokeWidth="2.4" fill="none" strokeLinecap="round"/>
+        <path d="M-7,-20 Q0,-12 7,-20" stroke="#C0805A" strokeWidth="2" fill="#B8492F" strokeLinecap="round"/>
+      </g>
+    );
+    if (mood === "worried") return (
+      <g transform={`scale(${scale})`}>
+        <path d="M-18,-12 L-23,28 L-7,25 L-11,-8 Z" fill="#0E7A8A"/>
+        <rect x="-13" y="24" width="11" height="18" fill="#2B3845"/>
+        <rect x="2" y="24" width="11" height="18" fill="#2B3845"/>
+        <path d="M-30,-10 Q-38,4 -30,20 Q-22,4 -30,-10 Z" fill="#C9D1D9" transform="rotate(-6 -30 5)"/>
+        <path d="M-30,-7 Q-36,4 -30,16 Q-25,4 -30,-7 Z" fill="#00C8D4" transform="rotate(-6 -30 5)"/>
+        <rect x="-26" y="-2" width="9" height="18" rx="3" fill="#00C8D4" transform="rotate(10 -22 7)"/>
+        <rect x="15" y="-4" width="9" height="18" rx="3" fill="#00C8D4" transform="rotate(-14 20 5)"/>
+        <rect x="22" y="14" width="4" height="22" fill="#E9EEF3" transform="rotate(-14 24 25)"/>
+        <path d="M-17,-14 Q0,-20 17,-14 L15,22 Q0,28 -15,22 Z" fill="#00C8D4"/>
+        <path d="M-13,-16 Q0,-10 13,-16 L13,-10 Q0,-4 -13,-10 Z" fill="#F2A23C"/>
+        <circle cx="0" cy="-30" r="20" fill="#F4D1A8" transform="rotate(-4 0 -30)"/>
+        <path d="M-21,-32 Q-24,-52 0,-54 Q24,-52 21,-32 Q14,-42 6,-38 Q0,-44 -6,-38 Q-14,-42 -21,-32 Z" fill="#8B5A2B"/>
+        <path d="M-22,-40 Q0,-56 22,-40 Q22,-44 0,-48 Q-22,-44 -22,-40 Z" fill="#0E7A8A"/>
+        <circle cx="0" cy="-50" r="4" fill="#FFD166"/>
+        <ellipse cx="-8" cy="-29" rx="3" ry="4" fill="#0D1117"/>
+        <ellipse cx="8" cy="-29" rx="3" ry="4" fill="#0D1117"/>
+        <path d="M-4,-19 Q0,-22 4,-19" stroke="#C0805A" strokeWidth="1.8" fill="none" strokeLinecap="round"/>
+        <path d="M16,-36 Q19,-31 16,-27 Q13,-31 16,-36 Z" fill="#7DD3E0"/>
+      </g>
+    );
+    return (
+      <g transform={`scale(${scale})`}>
+        <path d="M-20,-12 L-26,30 L-8,26 L-12,-8 Z" fill="#0E7A8A"/>
+        <rect x="-13" y="24" width="11" height="18" fill="#2B3845"/>
+        <rect x="2" y="24" width="11" height="18" fill="#2B3845"/>
+        <path d="M-38,-10 Q-44,2 -38,16 Q-32,2 -38,-10 Z" fill="#C9D1D9"/>
+        <path d="M-38,-8 Q-42,2 -38,13 Q-34,2 -38,-8 Z" fill="#00C8D4"/>
+        <rect x="-30" y="-8" width="9" height="18" rx="3" fill="#00C8D4"/>
+        <rect x="17" y="-10" width="9" height="20" rx="3" fill="#00C8D4"/>
+        <rect x="20" y="8" width="6" height="5" fill="#3D2B1F"/>
+        <rect x="21" y="-30" width="4" height="40" fill="#E9EEF3"/>
+        <path d="M21,-30 L23,-36 L25,-30 Z" fill="#E9EEF3"/>
+        <path d="M-17,-14 Q0,-20 17,-14 L15,22 Q0,28 -15,22 Z" fill="#00C8D4"/>
+        <path d="M-13,-16 Q0,-10 13,-16 L13,-10 Q0,-4 -13,-10 Z" fill="#F2A23C"/>
+        <circle cx="0" cy="-32" r="20" fill="#F4D1A8"/>
+        <path d="M-21,-34 Q-24,-54 0,-56 Q24,-54 21,-34 Q14,-44 6,-40 Q0,-46 -6,-40 Q-14,-44 -21,-34 Z" fill="#8B5A2B"/>
+        <path d="M-22,-42 Q0,-58 22,-42 Q22,-46 0,-50 Q-22,-46 -22,-42 Z" fill="#0E7A8A"/>
+        <circle cx="0" cy="-52" r="4" fill="#FFD166"/>
+        <circle cx="-8" cy="-30" r="3.2" fill="#0D1117"/>
+        <circle cx="8" cy="-30" r="3.2" fill="#0D1117"/>
+        <path d="M-3,-20 Q0,-18 3,-20" stroke="#C0805A" strokeWidth="1.5" fill="none" strokeLinecap="round"/>
+      </g>
+    );
+  }
+  if (type === "npc1") {
+    if (mood === "happy") return (
+      <g transform={`scale(${scale})`}>
+        <path d="M-28,-14 L-38,36 L-6,32 L-10,-10 Z" fill="#7A1F1F"/>
+        <path d="M-18,-18 L-44,-36 L-36,-46 L-12,-26 Z" fill="#A12E2E"/>
+        <path d="M-50,-50 Q-60,-36 -50,-20 Q-40,-36 -50,-50 Z" fill="#5C5C5C" transform="rotate(-15 -50 -36)"/>
+        <path d="M18,-18 L42,-40 L34,-48 L10,-26 Z" fill="#A12E2E"/>
+        <rect x="30" y="-78" width="7" height="40" fill="#C9D1D9" transform="rotate(8 34 -58)"/>
+        <path d="M-24,-18 Q0,-26 24,-18 L21,24 Q0,30 -21,24 Z" fill="#E24B4A"/>
+        <circle cx="0" cy="-36" r="22" fill="#F0C8A0"/>
+        <path d="M-25,-46 Q0,-60 25,-46 Q25,-50 0,-54 Q-25,-50 -25,-46 Z" fill="#5C5C5C"/>
+        <circle cx="0" cy="-56" r="3.5" fill="#E24B4A"/>
+        <path d="M-15,-37 Q-10,-33 -5,-37" stroke="#3D2B1F" strokeWidth="2.4" fill="none" strokeLinecap="round"/>
+        <path d="M5,-37 Q10,-33 15,-37" stroke="#3D2B1F" strokeWidth="2.4" fill="none" strokeLinecap="round"/>
+        <path d="M-7,-25 Q0,-19 8,-26" stroke="#7A4530" strokeWidth="2.4" fill="none" strokeLinecap="round"/>
+      </g>
+    );
+    if (mood === "worried") return (
+      <g transform={`scale(${scale})`}>
+        <path d="M-26,-14 L-32,34 L-6,30 L-9,-9 Z" fill="#7A1F1F"/>
+        <path d="M-40,-12 Q-50,4 -40,22 Q-30,4 -40,-12 Z" fill="#5C5C5C" transform="rotate(-8 -40 5)"/>
+        <path d="M-40,-8 Q-46,4 -40,18 Q-34,4 -40,-8 Z" fill="#E24B4A" transform="rotate(-8 -40 5)"/>
+        <rect x="27" y="14" width="7" height="38" fill="#C9D1D9" transform="rotate(-10 30 33)"/>
+        <path d="M-22,-16 Q0,-24 22,-16 L20,24 Q0,30 -20,24 Z" fill="#E24B4A"/>
+        <circle cx="0" cy="-34" r="22" fill="#F0C8A0" transform="rotate(-3 0 -34)"/>
+        <path d="M-25,-44 Q0,-58 25,-44 Q25,-48 0,-52 Q-25,-48 -25,-44 Z" fill="#5C5C5C"/>
+        <path d="M-15,-42 L-5,-37" stroke="#3D2B1F" strokeWidth="2.6" strokeLinecap="round"/>
+        <path d="M15,-42 L5,-37" stroke="#3D2B1F" strokeWidth="2.6" strokeLinecap="round"/>
+        <circle cx="-8" cy="-32" r="3.2" fill="#0D1117"/>
+        <circle cx="8" cy="-32" r="3.2" fill="#0D1117"/>
+        <path d="M-7,-21 Q0,-25 7,-21" stroke="#7A4530" strokeWidth="2" fill="none" strokeLinecap="round"/>
+        <path d="M-22,-26 Q-19,-20 -22,-15" fill="#7DD3E0"/>
+      </g>
+    );
+    return (
+      <g transform={`scale(${scale})`}>
+        <path d="M-28,-14 L-36,40 L-6,34 L-10,-10 Z" fill="#7A1F1F"/>
+        <path d="M-46,-14 Q-56,4 -46,24 Q-36,4 -46,-14 Z" fill="#5C5C5C"/>
+        <path d="M-46,-10 Q-52,4 -46,20 Q-40,4 -46,-10 Z" fill="#E24B4A"/>
+        <rect x="-40" y="-10" width="11" height="22" rx="3" fill="#A12E2E"/>
+        <rect x="22" y="-12" width="11" height="24" rx="3" fill="#A12E2E"/>
+        <rect x="25" y="-44" width="7" height="50" fill="#C9D1D9"/>
+        <path d="M-24,-18 Q0,-26 24,-18 L21,28 Q0,36 -21,28 Z" fill="#E24B4A"/>
+        <circle cx="0" cy="-38" r="22" fill="#F0C8A0"/>
+        <path d="M-25,-48 Q0,-62 25,-48 Q25,-52 0,-56 Q-25,-52 -25,-48 Z" fill="#5C5C5C"/>
+        <circle cx="0" cy="-58" r="3.5" fill="#E24B4A"/>
+        <path d="M-15,-40 L-6,-38" stroke="#3D2B1F" strokeWidth="2.4" strokeLinecap="round"/>
+        <path d="M15,-40 L6,-38" stroke="#3D2B1F" strokeWidth="2.4" strokeLinecap="round"/>
+        <circle cx="-9" cy="-34" r="3" fill="#0D1117"/>
+        <circle cx="9" cy="-34" r="3" fill="#0D1117"/>
+        <rect x="-6" y="-23" width="12" height="2.5" fill="#7A4530"/>
+      </g>
+    );
+  }
+  // npc2
+  if (mood === "happy") return (
+    <g transform={`scale(${scale})`}>
+      <path d="M-14,-10 L-22,20 L-5,17 L-7,-6 Z" fill="#1D7A4A" transform="rotate(10 -14 8)"/>
+      <path d="M-10,-12 L-24,-26 L-18,-32 L-6,-18 Z" fill="#1D7A4A"/>
+      <path d="M-32,-38 Q-37,-30 -32,-22 Q-27,-30 -32,-38 Z" fill="#3FB950" transform="rotate(-20 -32 -30)"/>
+      <path d="M10,-12 L24,-28 L18,-34 L6,-18 Z" fill="#1D7A4A"/>
+      <rect x="16" y="-54" width="3" height="26" fill="#E9EEF3" transform="rotate(10 17 -41)"/>
+      <path d="M-13,-14 Q0,-19 13,-14 L12,16 Q0,21 -11,16 Z" fill="#3FB950"/>
+      <circle cx="0" cy="-28" r="16" fill="#F4D1A8"/>
+      <path d="M-17,-30 Q-19,-44 0,-47 Q19,-44 17,-30 Q12,-37 5,-34 Q0,-39 -5,-34 Q-12,-37 -17,-30 Z" fill="#2B5C3D"/>
+      <path d="M-18,-34 Q0,-42 18,-34" stroke="#1D7A4A" strokeWidth="3" fill="none" strokeLinecap="round"/>
+      <path d="M-11,-26 Q-7,-22 -3,-26" stroke="#0D1117" strokeWidth="2.2" fill="none" strokeLinecap="round"/>
+      <circle cx="7" cy="-25" r="3.4" fill="#0D1117"/>
+      <path d="M-5,-16 Q0,-11 6,-17" stroke="#C0805A" strokeWidth="1.8" fill="none" strokeLinecap="round"/>
+    </g>
+  );
+  if (mood === "worried") return (
+    <g transform={`scale(${scale})`}>
+      <path d="M-13,-10 L-17,20 L-5,17 L-6,-6 Z" fill="#1D7A4A"/>
+      <path d="M-22,-6 Q-27,2 -22,10 Q-17,2 -22,-6 Z" fill="#C9D1D9" transform="rotate(-10 -22 2)"/>
+      <path d="M-22,-4 Q-25,2 -22,8 Q-19,2 -22,-4 Z" fill="#3FB950" transform="rotate(-10 -22 2)"/>
+      <rect x="17" y="10" width="3" height="22" fill="#E9EEF3" transform="rotate(-16 18 21)"/>
+      <path d="M-13,-10 Q0,-15 13,-10 L11,18 Q0,22 -11,18 Z" fill="#3FB950"/>
+      <circle cx="0" cy="-24" r="16" fill="#F4D1A8" transform="rotate(-5 0 -24)"/>
+      <path d="M-17,-26 Q-19,-40 0,-43 Q19,-40 17,-26 Q12,-33 5,-30 Q0,-35 -5,-30 Q-12,-33 -17,-26 Z" fill="#2B5C3D"/>
+      <path d="M-18,-30 Q0,-38 18,-30" stroke="#1D7A4A" strokeWidth="3" fill="none" strokeLinecap="round"/>
+      <circle cx="-7" cy="-21" r="3.8" fill="#0D1117"/>
+      <circle cx="7" cy="-21" r="3.8" fill="#0D1117"/>
+      <path d="M-11,-29 L-4,-26" stroke="#1D4D2F" strokeWidth="1.6" strokeLinecap="round"/>
+      <path d="M11,-29 L4,-26" stroke="#1D4D2F" strokeWidth="1.6" strokeLinecap="round"/>
+      <path d="M-3,-12 Q0,-15 3,-12" stroke="#C0805A" strokeWidth="1.6" fill="none" strokeLinecap="round"/>
+      <path d="M12,-26 Q15,-21 12,-17" fill="#7DD3E0"/>
+    </g>
+  );
+  return (
+    <g transform={`scale(${scale})`}>
+      <path d="M-14,-10 L-19,22 L-5,19 L-7,-6 Z" fill="#1D7A4A"/>
+      <path d="M-26,-8 Q-31,2 -26,12 Q-21,2 -26,-8 Z" fill="#C9D1D9"/>
+      <path d="M-26,-6 Q-29,2 -26,10 Q-23,2 -26,-6 Z" fill="#3FB950"/>
+      <rect x="-23" y="-6" width="7" height="14" rx="2" fill="#1D7A4A"/>
+      <rect x="16" y="-7" width="7" height="14" rx="2" fill="#1D7A4A"/>
+      <rect x="19" y="-26" width="3" height="28" fill="#E9EEF3"/>
+      <path d="M-15,-12 Q0,-17 15,-12 L13,18 Q0,23 -13,18 Z" fill="#3FB950"/>
+      <circle cx="0" cy="-26" r="16" fill="#F4D1A8"/>
+      <path d="M-18,-32 Q0,-40 18,-32" stroke="#1D7A4A" strokeWidth="3" fill="none" strokeLinecap="round"/>
+      <circle cx="-7" cy="-23" r="3.4" fill="#0D1117"/>
+      <circle cx="7" cy="-23" r="3.4" fill="#0D1117"/>
+      <path d="M-4,-14 Q0,-11 5,-15" stroke="#C0805A" strokeWidth="1.6" fill="none" strokeLinecap="round"/>
+    </g>
+  );
+}
+
+// ============================================================
+// BATTLE BOARD SCENE：陣取り合戦ボード（動的アニメーション）
+// ============================================================
+function BattleBoardScene({ prevShares, finalShares, onComplete }) {
+  // prevShares / finalShares: { player: 0-1, npc1: 0-1, npc2: 0-1 } (合計1.0、未開拓含む)
+  const COLS = 8, ROWS = 6, TOTAL = COLS * ROWS;
+  const COLORS = { player:"#00C8D4", npc1:"#E24B4A", npc2:"#3FB950", none:"#30363D" };
+
+  // シェア比率からマス割り当てを生成（左上から順に塗っていく簡易ロジック）
+  function buildGrid(shares) {
+    const counts = {
+      player: Math.round((shares.player||0) * TOTAL),
+      npc1: Math.round((shares.npc1||0) * TOTAL),
+      npc2: Math.round((shares.npc2||0) * TOTAL),
+    };
+    const used = counts.player + counts.npc1 + counts.npc2;
+    counts.none = Math.max(0, TOTAL - used);
+    // 陣営ごとにまとまったブロックにするため、コーナーから埋める
+    const grid = new Array(TOTAL).fill("none");
+    let idx = 0;
+    // player: 左下から
+    for (let i=0; i<counts.player && idx<TOTAL; i++) grid[idx++] = "player";
+    // npc1: 右上から（逆順で埋める）
+    let ri = TOTAL - 1;
+    for (let i=0; i<counts.npc1; i++) { while (grid[ri] !== "none" && ri>=0) ri--; if (ri>=0) grid[ri--] = "npc1"; }
+    // npc2: 右下寄り
+    let ri2 = TOTAL - 1;
+    for (let i=0; i<counts.npc2; i++) { while (grid[ri2] !== "none" && ri2>=0) ri2--; if (ri2>=0) grid[ri2--] = "npc2"; }
+    return grid;
+  }
+
+  const prevGrid = buildGrid(prevShares);
+  const finalGrid = buildGrid(finalShares);
+
+  const [step, setStep] = useState(0); // 0=prev表示, 1=フラッシュ中, 2=final表示+キャラ反応
+  useEffect(() => {
+    setStep(0);
+    const t1 = setTimeout(() => setStep(1), 500);
+    const t2 = setTimeout(() => setStep(2), 1400);
+    const t3 = setTimeout(() => { if (onComplete) onComplete(); }, 2400);
+    return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); };
+  }, [JSON.stringify(finalShares)]);
+
+  const displayGrid = step === 0 ? prevGrid : finalGrid;
+  const changedCells = prevGrid.map((c, i) => c !== finalGrid[i]);
+
+  // 結果に応じたキャラのmood判定
+  const moodFor = (key) => {
+    const prev = prevShares[key] || 0, fin = finalShares[key] || 0;
+    if (fin > prev + 0.02) return "happy";
+    if (fin < prev - 0.02) return "worried";
+    return "normal";
+  };
+  const playerMood = step >= 2 ? moodFor("player") : "normal";
+  const npc1Mood = step >= 2 ? moodFor("npc1") : "normal";
+  const npc2Mood = step >= 2 ? moodFor("npc2") : "normal";
+
+  const cellSize = 36, gap = 1;
+  const boardW = COLS * (cellSize+gap), boardH = ROWS * (cellSize+gap);
+
+  return (
+    <Panel style={{marginBottom:14, overflow:"hidden"}}>
+      <Label style={{display:"block", marginBottom:12, textAlign:"center"}}>⚔️ 市場争奪戦</Label>
+      <div style={{display:"flex", justifyContent:"center", alignItems:"center", gap:16, flexWrap:"wrap"}}>
+        {/* NPC1 (上) */}
+        <div style={{display:"flex", flexDirection:"column", alignItems:"center", gap:4}}>
+          <svg width="70" height="80" viewBox="-40 -70 80 90">
+            <CharacterSprite type="npc1" mood={npc1Mood} scale={0.85}/>
+          </svg>
+          <span style={{fontSize:9, color:"#E24B4A", fontWeight:700}}>グローバルウェア</span>
+        </div>
+
+        {/* ボード */}
+        <svg width={boardW} height={boardH} style={{flexShrink:0}}>
+          {displayGrid.map((color, i) => {
+            const col = i % COLS, row = Math.floor(i / COLS);
+            const changed = changedCells[i];
+            const isFlashing = changed && step === 1;
+            return (
+              <rect
+                key={i}
+                x={col*(cellSize+gap)} y={row*(cellSize+gap)}
+                width={cellSize} height={cellSize} rx="2"
+                fill={isFlashing ? "#FFFFFF" : COLORS[color]}
+                opacity={isFlashing ? 0.9 : 1}
+                style={{transition:"fill 0.5s ease, opacity 0.3s ease"}}
+              />
+            );
+          })}
+        </svg>
+
+        {/* NPC2 (下) */}
+        <div style={{display:"flex", flexDirection:"column", alignItems:"center", gap:4}}>
+          <svg width="60" height="70" viewBox="-30 -55 60 75">
+            <CharacterSprite type="npc2" mood={npc2Mood} scale={0.8}/>
+          </svg>
+          <span style={{fontSize:9, color:"#3FB950", fontWeight:700}}>ネクストビット</span>
+        </div>
+      </div>
+
+      {/* プレイヤー（下部中央） */}
+      <div style={{display:"flex", justifyContent:"center", marginTop:10}}>
+        <div style={{display:"flex", flexDirection:"column", alignItems:"center", gap:4}}>
+          <svg width="80" height="90" viewBox="-45 -75 90 95">
+            <CharacterSprite type="player" mood={playerMood} scale={1}/>
+          </svg>
+          <span style={{fontSize:10, color:"#00C8D4", fontWeight:700}}>あなた</span>
+        </div>
+      </div>
+
+      {/* 凡例 */}
+      <div style={{display:"flex", justifyContent:"center", gap:14, marginTop:10, fontSize:10, color:"#8B949E"}}>
+        <span><span style={{display:"inline-block",width:8,height:8,background:COLORS.player,borderRadius:2,marginRight:4}}/>あなた</span>
+        <span><span style={{display:"inline-block",width:8,height:8,background:COLORS.npc1,borderRadius:2,marginRight:4}}/>グローバルウェア</span>
+        <span><span style={{display:"inline-block",width:8,height:8,background:COLORS.npc2,borderRadius:2,marginRight:4}}/>ネクストビット</span>
+        <span><span style={{display:"inline-block",width:8,height:8,background:COLORS.none,borderRadius:2,marginRight:4}}/>未開拓</span>
+      </div>
+    </Panel>
+  );
+}
+
 function BattleResultCard({ competResult, prevStores, finalStores }) {
   const cr = competResult || {};
   const newU = cr.newFromUnclaimed || 0;
@@ -2213,6 +2522,7 @@ export default function App() {
   const [allocation,setAllocation] = useState({sales:0,dev:0,marketing:0,price:0,cs:0});
   const [investTarget,setInvestTarget] = useState(null); // Stage2: 今期の投資目標額（未入力=null）
   const [showBorrowPanel,setShowBorrowPanel] = useState(false); // Stage3: 借入確認パネルの表示
+  const [borrowedThisQuarter,setBorrowedThisQuarter] = useState(0); // 今Q新規借入した額（investRatio制限なしで使える）
   const [prevAllocation,setPrevAllocation] = useState({sales:0,dev:0,marketing:0,price:0,cs:0});
   const [specialAction,setSpecialAction] = useState(null);
   const [usedSpecials,setUsedSpecials]   = useState([]);
@@ -2460,10 +2770,13 @@ export default function App() {
   // BS連動型投資上限（継続効果のinvestBonusも加算）
   const investBonusFromEffects = activeEffects.filter(e=>e.type==="investBonus").reduce((s,e)=>s+e.value,0);
   // ★ Stage2: 自己資金だけで出せる上限（旧availableBudgetの実体）
-  const selfFundCapacity = bs ? calcInvestCapacity(bs, playerType, lastNetIncome) + investBonusFromEffects : 0;
+  // ★ Stage3: 今Q新規借入した分はinvestRatio制限を受けずそのまま全額投資に使える
+  const selfFundCapacity = bs
+    ? calcInvestCapacity(bs, playerType, lastNetIncome) + investBonusFromEffects + borrowedThisQuarter
+    : 0;
   // 投資目標額（未入力ならデフォルトで自己資金上限と同額にしておく＝従来の挙動を維持）
   const effectiveTarget = investTarget != null ? investTarget : selfFundCapacity;
-  // 不足額（Stage3で借入により解消される想定。現時点では配分可能額はselfFundCapacityに制限）
+  // 不足額（借入で解消可能。現時点でまだ解消されていない分）
   const shortfall = Math.max(0, effectiveTarget - selfFundCapacity);
   // 実際に配分に使える額（自己資金上限とtargetの小さい方）
   const availableBudget = Math.min(effectiveTarget, selfFundCapacity);
@@ -2477,6 +2790,7 @@ export default function App() {
     const actualAmount = Math.min(amount, limit);
     if (actualAmount <= 0) return;
     setBs(b => borrowMoney(b, actualAmount));
+    setBorrowedThisQuarter(b => b + actualAmount); // ★ 今Q借入した分はinvestRatio制限を受けずに使える
     setShowBorrowPanel(false);
   }
 
@@ -2610,7 +2924,7 @@ export default function App() {
       setLastNetIncome(pl.netIncome); setNarratives(newNarratives2);
       setActiveEffects(newActiveEffects);
       setPrevAllocation(allocation); setAllocation({...allocation}); setSpecialAction(null);
-      setInvestTarget(null); // Stage2: 次Qは自己資金上限を基準にリセット
+      setInvestTarget(null); setBorrowedThisQuarter(0); // Stage2/3: 次Qはリセット
       setPendingChoice(ev); // 選択画面へ
       setScreen("choice");
       return;
@@ -2628,7 +2942,7 @@ export default function App() {
     setLastNetIncome(pl.netIncome); setNarratives(newNarratives);
     setActiveEffects(newActiveEffects);
     setPrevAllocation(allocation); setAllocation({...allocation}); setSpecialAction(null);
-    setInvestTarget(null); // Stage2: 次Qは自己資金上限を基準にリセット
+    setInvestTarget(null); setBorrowedThisQuarter(0); // Stage2/3: 次Qはリセット
     goToResultOrForecast(pl);
   }
 
@@ -3025,7 +3339,7 @@ export default function App() {
           <button onClick={()=>{
             setScreen("lobby");setMarketId(null);setPlayerType(null);setBs(null);setOps(null);
             setQuarter(1);setUsedSpecials([]);setHistory([]);setLastPL(null);setLastEvent(null);
-            setLastNetIncome(0);setPrevNpcOps({});setNarratives([]);setPrevOps(null);setInvestTarget(null);
+            setLastNetIncome(0);setPrevNpcOps({});setNarratives([]);setPrevOps(null);setInvestTarget(null);setBorrowedThisQuarter(0);
             setAllocation({sales:0,dev:0,marketing:0,price:0,cs:0});
             setOnlineMode(false);setOnlineInfo(null);
             setPendingChoice(null);setPendingPrice(null);setActiveEffects([]);setPermanentOpexExtra(0);
@@ -3058,86 +3372,9 @@ export default function App() {
               </div>
             </div>
           )}
-          {lastPL.playerAlloc && (
-            <Panel style={{marginBottom:14}}>
-              <Label style={{display:"block",marginBottom:8}}>今期の予算配分</Label>
-              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-                {BUDGET_ITEMS.map(item=>{
-                  const v=lastPL.playerAlloc[item.id]||0;
-                  return v>0?(
-                    <div key={item.id} style={{background:`${item.color}18`,border:`1px solid ${item.color}44`,borderRadius:20,padding:"3px 12px",fontSize:11,color:item.color,fontWeight:700}}>
-                      {item.icon} {item.name} ¥{v}万
-                    </div>
-                  ):null;
-                })}
-                {lastPL.playerSpecial && (
-                  <div style={{background:`${C.cyan}18`,border:`1px solid ${C.cyan}44`,borderRadius:20,padding:"3px 12px",fontSize:11,color:C.cyan,fontWeight:700}}>
-                    ⚡ {SPECIAL_ACTIONS[lastPL.playerSpecial]?.name}
-                  </div>
-                )}
-              </div>
-            </Panel>
-          )}
-          {/* 競争ナラティブメッセージ */}
-          {narratives.length > 0 && (
-            <div style={{display:"grid",gap:8,marginBottom:14}}>
-              {narratives.map((msg,i) => (
-                <div key={i} style={{
-                  background:`${msg.color}12`,
-                  border:`1px solid ${msg.color}44`,
-                  borderLeft:`3px solid ${msg.color}`,
-                  borderRadius:8, padding:"10px 14px",
-                  display:"flex", gap:12, alignItems:"flex-start"
-                }}>
-                  <span style={{fontSize:20,flexShrink:0}}>{msg.icon}</span>
-                  <span style={{fontSize:12,color:"#F0F6FC",lineHeight:1.5}}>{msg.text}</span>
-                </div>
-              ))}
-            </div>
-          )}
 
-          {/* マーケットシェア */}
-          <Panel style={{marginBottom:14}}>
-            <Label style={{display:"block",marginBottom:12}}>マーケットシェア</Label>
-            <MarketShareChart
-              players={[
-                {name:"あなた", stores:Math.floor(ops.stores)||0, color:"#00C8D4", isPlayer:true},
-                ...npcs.map(n=>({name:n.name, stores:Math.floor(n.ops.stores)||0, color:n.color, isPlayer:false}))
-              ]}
-              market={market}
-              quarter={quarter}
-            />
-          </Panel>
-
-          {/* 競争スコア差の警告 */}
-          {(() => {
-            const myScore = competitiveScore(ops, market?.arpu);
-            const threats = npcs.filter(n => competitiveScore(n.ops, market?.arpu) > myScore + 5);
-            if (threats.length === 0) return null;
-            return (
-              <div style={{background:"#F8514912",border:"1px solid #F8514944",borderRadius:8,padding:"10px 14px",marginBottom:14}}>
-                <div style={{fontSize:12,fontWeight:700,color:"#F85149",marginBottom:6}}>⚠️ スコア劣位 — 来Q以降の流出リスク</div>
-                {threats.map(n => {
-                  const diff = competitiveScore(n.ops, market?.arpu) - myScore;
-                  const lossRate = Math.min(20, Math.floor(diff * 0.25 * getPhase(quarter).stealMultiplier));
-                  return (
-                    <div key={n.id} style={{fontSize:11,color:"#8B949E",marginTop:3}}>
-                      <span style={{color:n.color,fontWeight:700}}>{n.name}</span>
-                      {" "}にスコアで{diff.toFixed(1)}差をつけられている。
-                      現在{ops.stores}店なら来Q約<span style={{color:"#F85149",fontWeight:700}}>{Math.floor(ops.stores*lossRate/100)}店</span>の流出予測。
-                    </div>
-                  );
-                })}
-              </div>
-            );
-          })()}
-
-          <PLBuildAnimation pl={lastPL} quarter={quarter} onComplete={() => setBsAnimReady(true)}/>
-
-          {bsAnimReady && <BSBuildAnimation bs={bs} quarter={quarter}/>}
-
-          {/* Stage1: 前Q投資の反映を可視化 */}
-          {bsAnimReady && prevOps && (() => {
+          {/* ① 原因：前Q投資の反映 */}
+          {prevOps && (() => {
             const changes = [
               ["👥 営業力", "salesPower", C.cyan],
               ["⚙️ 品質", "solutionQuality", C.purple],
@@ -3167,14 +3404,99 @@ export default function App() {
             );
           })()}
 
-          {/* 競争内訳：アニメーション演出版 */}
+          {/* ② 過程：競争ナラティブ */}
+          {narratives.length > 0 && (
+            <div style={{display:"grid",gap:8,marginBottom:14}}>
+              {narratives.map((msg,i) => (
+                <div key={i} style={{
+                  background:`${msg.color}12`,
+                  border:`1px solid ${msg.color}44`,
+                  borderLeft:`3px solid ${msg.color}`,
+                  borderRadius:8, padding:"10px 14px",
+                  display:"flex", gap:12, alignItems:"flex-start"
+                }}>
+                  <span style={{fontSize:20,flexShrink:0}}>{msg.icon}</span>
+                  <span style={{fontSize:12,color:"#F0F6FC",lineHeight:1.5}}>{msg.text}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* ② 過程：陣取り合戦ボード（動的アニメーション） */}
+          {(() => {
+            const prevPlayerStores = Math.max(0, Math.floor((ops.stores||0) - (cr?.newFromUnclaimed||0) - (cr?.stolenFromRivals||0) + (cr?.naturalChurn||0) + (cr?.lostToRivals||0)));
+            const finalPlayerStores = Math.floor(ops.stores)||0;
+            const npc1Stores = Math.floor(npcs[0]?.ops.stores)||0;
+            const npc2Stores = Math.floor(npcs[1]?.ops.stores)||0;
+            const totalAvail = Math.max(1, Math.floor(market.totalStores * marketPenetration(quarter)));
+            const finalShares = {
+              player: finalPlayerStores/totalAvail,
+              npc1: npc1Stores/totalAvail,
+              npc2: npc2Stores/totalAvail,
+            };
+            // 前Qのシェアは差分から逆算（厳密でなくても陣取りの変化を見せる目的なので近似でOK）
+            const prevShares = {
+              player: prevPlayerStores/totalAvail,
+              npc1: Math.max(0,(npc1Stores - (cr?.stolenFromRivals||0)*0))/totalAvail, // NPCの前期値は簡略化
+              npc2: Math.max(0,(npc2Stores))/totalAvail,
+            };
+            return (
+              <BattleBoardScene
+                prevShares={prevShares}
+                finalShares={finalShares}
+              />
+            );
+          })()}
+
+          {/* ② 過程：戦況バトルカード（奪取/解約の内訳） */}
           <BattleResultCard
             competResult={cr}
             prevStores={Math.max(0, Math.floor((ops.stores||0) - (cr?.newFromUnclaimed||0) - (cr?.stolenFromRivals||0) + (cr?.naturalChurn||0) + (cr?.lostToRivals||0)))}
             finalStores={Math.floor(ops.stores)||0}
           />
 
-          {/* 競合の動向（スコア変化付き）*/}
+          {/* ③ 結果：マーケットシェア */}
+          <Panel style={{marginBottom:14}}>
+            <Label style={{display:"block",marginBottom:12}}>マーケットシェア</Label>
+            <MarketShareChart
+              players={[
+                {name:"あなた", stores:Math.floor(ops.stores)||0, color:"#00C8D4", isPlayer:true},
+                ...npcs.map(n=>({name:n.name, stores:Math.floor(n.ops.stores)||0, color:n.color, isPlayer:false}))
+              ]}
+              market={market}
+              quarter={quarter}
+            />
+          </Panel>
+
+          {/* ③ 結果：競争スコア差の警告（次Qへの予兆） */}
+          {(() => {
+            const myScore = competitiveScore(ops, market?.arpu);
+            const threats = npcs.filter(n => competitiveScore(n.ops, market?.arpu) > myScore + 5);
+            if (threats.length === 0) return null;
+            return (
+              <div style={{background:"#F8514912",border:"1px solid #F8514944",borderRadius:8,padding:"10px 14px",marginBottom:14}}>
+                <div style={{fontSize:12,fontWeight:700,color:"#F85149",marginBottom:6}}>⚠️ スコア劣位 — 来Q以降の流出リスク</div>
+                {threats.map(n => {
+                  const diff = competitiveScore(n.ops, market?.arpu) - myScore;
+                  const lossRate = Math.min(20, Math.floor(diff * 0.25 * getPhase(quarter).stealMultiplier));
+                  return (
+                    <div key={n.id} style={{fontSize:11,color:"#8B949E",marginTop:3}}>
+                      <span style={{color:n.color,fontWeight:700}}>{n.name}</span>
+                      {" "}にスコアで{diff.toFixed(1)}差をつけられている。
+                      現在{ops.stores}店なら来Q約<span style={{color:"#F85149",fontWeight:700}}>{Math.floor(ops.stores*lossRate/100)}店</span>の流出予測。
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
+
+          {/* ④ 数字：PL/BS組成アニメーション */}
+          <PLBuildAnimation pl={lastPL} quarter={quarter} onComplete={() => setBsAnimReady(true)}/>
+
+          {bsAnimReady && <BSBuildAnimation bs={bs} quarter={quarter}/>}
+
+          {/* ⑤ 将来予測：競合の動向 */}
           <Panel style={{marginTop:14}}>
             <Label style={{display:"block",marginBottom:10}}>競合の動向</Label>
             {npcs.map(n => {
@@ -3256,6 +3578,29 @@ export default function App() {
               );
             })}
           </Panel>
+
+          {/* ⑥ 振り返り：今期の予算配分 */}
+          {lastPL.playerAlloc && (
+            <Panel style={{marginTop:14}}>
+              <Label style={{display:"block",marginBottom:8}}>📝 今期の予算配分（振り返り）</Label>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                {BUDGET_ITEMS.map(item=>{
+                  const v=lastPL.playerAlloc[item.id]||0;
+                  return v>0?(
+                    <div key={item.id} style={{background:`${item.color}18`,border:`1px solid ${item.color}44`,borderRadius:20,padding:"3px 12px",fontSize:11,color:item.color,fontWeight:700}}>
+                      {item.icon} {item.name} ¥{v}万
+                    </div>
+                  ):null;
+                })}
+                {lastPL.playerSpecial && (
+                  <div style={{background:`${C.cyan}18`,border:`1px solid ${C.cyan}44`,borderRadius:20,padding:"3px 12px",fontSize:11,color:C.cyan,fontWeight:700}}>
+                    ⚡ {SPECIAL_ACTIONS[lastPL.playerSpecial]?.name}
+                  </div>
+                )}
+              </div>
+            </Panel>
+          )}
+
           <button onClick={advance} style={{marginTop:18,width:"100%",background:`linear-gradient(135deg,#006080,${C.cyan})`,color:"#fff",border:"none",borderRadius:10,padding:14,fontSize:14,fontWeight:700,cursor:"pointer",letterSpacing:2}}>
             {quarter>=MAX_QUARTERS?"最終結果を見る 🏁":`Year ${Math.ceil((quarter+1)/4)} Q${(quarter%4)+1} へ →`}
           </button>
