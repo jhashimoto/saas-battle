@@ -452,41 +452,61 @@ function resolveMarket(allPlayers, market, quarter, extraUnclaimed = 0) {
     const rawNewFromUnclaimed = Math.floor(unclaimed * myShare * 0.15 * phase.growthBonus * rand(0.30));
     const newFromUnclaimed = unclaimed > 0 ? Math.max(1, rawNewFromUnclaimed) : 0;
 
-    // 競合からの奪取（スコア差 + 価格差ボーナス + 営業力ボーナス）：±10%のブレ
+    // 競合からの奪取（スコア差 + 3つの対抗関係ボーナス）：±10%のブレ
     let stolenFromRivals = 0;
     allPlayers.forEach((rival, j) => {
       if (i === j || rival.ops.stores === 0) return;
       const diff = myScore - scores[j];
       if (diff > 0) {
         let rate = Math.min(0.20, (diff / Math.max(scores[j], 1)) * 0.25 * phase.stealMultiplier);
-        // ★ 営業力ボーナス：salesPowerが高いほど奪取率に上乗せ（スコア差に関係なく効く）
-        const salesBonus = (player.ops.salesPower / 150) * 0.08;
-        rate = Math.min(0.35, rate + salesBonus);
-        // ★ 価格差ボーナス
+
+        // ★ 対抗関係①：自分の営業力 vs 相手のブランド力
+        // 営業力が高く、相手のブランドが低いほど効く（無名の相手の顧客は営業トークで動く）
+        const salesVsBrand = (player.ops.salesPower / 150) * (1 - rival.ops.brandAwareness / 150) * 0.12;
+        rate += Math.max(0, salesVsBrand);
+
+        // ★ 対抗関係②：自分の価格優位 vs 相手の品質
+        // 安さで攻めても、相手の品質が圧倒的だと刺さりにくい（減衰させる）
         const myPrice = player.ops.setPrice || market.arpu;
         const rivalPrice = rival.ops.setPrice || market.arpu;
         if (myPrice < rivalPrice) {
           const priceDiffRatio = (rivalPrice - myPrice) / rivalPrice;
-          rate = Math.min(0.40, rate + priceDiffRatio * (market.priceSensitivity || 0.6) * 0.4);
+          const qualityResistance = Math.max(0.3, 1 - rival.ops.solutionQuality / 150); // 品質が高いほど0.3に近づき効果減衰
+          rate += priceDiffRatio * (market.priceSensitivity || 0.6) * 0.4 * qualityResistance;
         }
+
+        rate = Math.max(0, Math.min(0.40, rate));
         stolenFromRivals += Math.floor(rival.ops.stores * rate * rand(0.20));
       }
     });
 
-    // 競合に奪われる（スコア差 + 価格差ペナルティ）：±10%のブレ
+    // 競合に奪われる（スコア差 + 対抗関係ペナルティ - CSによる防御）：±10%のブレ
     let lostToRivals = 0;
     allPlayers.forEach((rival, j) => {
       if (i === j || player.ops.stores === 0) return;
       const diff = scores[j] - myScore;
       if (diff > 0) {
         let rate = Math.min(0.20, (diff / Math.max(myScore, 1)) * 0.25 * phase.stealMultiplier);
-        // ★ 自分が高く相手が安い場合：価格差に応じて追加流出
+
+        // 相手から見た対抗関係①：相手の営業力 vs 自分のブランド力
+        const rivalSalesVsMyBrand = (rival.ops.salesPower / 150) * (1 - player.ops.brandAwareness / 150) * 0.12;
+        rate += Math.max(0, rivalSalesVsMyBrand);
+
+        // 相手から見た対抗関係②：相手の価格優位 vs 自分の品質
         const myPrice = player.ops.setPrice || market.arpu;
         const rivalPrice = rival.ops.setPrice || market.arpu;
         if (myPrice > rivalPrice) {
           const priceDiffRatio = (myPrice - rivalPrice) / myPrice;
-          rate = Math.min(0.30, rate + priceDiffRatio * (market.priceSensitivity || 0.6) * 0.4);
+          const qualityResistance = Math.max(0.3, 1 - player.ops.solutionQuality / 150);
+          rate += priceDiffRatio * (market.priceSensitivity || 0.6) * 0.4 * qualityResistance;
         }
+
+        // ★ 対抗関係③：自分のCS vs 相手の営業力（守備）
+        // CSが高いほど、相手の営業攻勢からの流出を防ぐ（流出率を減衰させる）
+        const csDefense = (player.ops.supportQuality / 150) * (rival.ops.salesPower / 150) * 0.5;
+        rate = Math.max(0, rate - csDefense);
+
+        rate = Math.min(0.30, rate);
         lostToRivals += Math.floor(player.ops.stores * rate * rand(0.20));
       }
     });
@@ -544,8 +564,13 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
     nOps = queuePendingInvestment(nOps, alloc);
     const nSpecial = Math.random() < 0.40 ? (n.strategy==="sales_heavy"?"chain_deal":"line_collab") : null;
     let nBs = {...n.bs};
-    if (nSpecial) { const r = applySpecialAction(nBs, nOps, nSpecial, []); nBs = r.bs; }
-    return { ...n, ops: nOps, bs: nBs, usedSpecial: nSpecial };
+    let nSgaAdd = 0; // ★ 特別アクションの費用分。PL計算に反映するため保持
+    if (nSpecial) {
+      const r = applySpecialAction(nBs, nOps, nSpecial, []);
+      nBs = r.bs; nOps = r.ops; nSgaAdd = r.sgaAdd || 0;
+      // r.capitalizeAmtはapplySpecialAction内でnBs.softwareAssetに既に加算済みなのでここでは何もしない
+    }
+    return { ...n, ops: nOps, bs: nBs, usedSpecial: nSpecial, specialSgaAdd: nSgaAdd };
   });
 
   // --- 競争解決 ---
@@ -635,14 +660,20 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
     const nAllocSga = nInvestTotal - nAllocCap;
     nBs.softwareAsset += nAllocCap;
 
+    // ★ 特別アクションの費用（applySpecialActionで既にnBs.cashから引かれている分）をPLにも計上
+    const nSgaAdd = n.specialSgaAdd || 0;
+
     // NPC: 借入アクションは取らない設計（Stage3の対象外）。debt=0のままなのでnIntは常に0
     const nInt = Math.floor(nBs.debt * INTEREST_RATE);
     const nRev = calcRevenue(nFinalOps, market);
     const nCogs = Math.floor(nRev * 0.25);
     const nVarC = calcVarCost(nFinalOps, market);
 
-    // ★ プレイヤーと同じBS整合ロジック
-    const nNetIncome = nRev - nCogs - nVarC - nBaseOpex - nAllocSga - nDep - nInt;
+    // ★ プレイヤーと同じBS整合ロジック（nSgaAddを費用として明示的に計上）
+    // 注意：applySpecialActionで既にnBs.cashからaction.costが引かれているため、
+    // ここでcashを再度引いてしまうと二重減算になる。
+    // そのためcash計算からはnSgaAdd分を除外し、retainedEarningsにはnSgaAddを反映させる。
+    const nNetIncome = nRev - nCogs - nVarC - nBaseOpex - nAllocSga - nSgaAdd - nDep - nInt;
     nBs.cash += nRev - nCogs - nVarC - nBaseOpex - nAllocSga - nAllocCap - nInt;
     nBs.retainedEarnings += nNetIncome;
 
