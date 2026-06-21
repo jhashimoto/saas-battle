@@ -45,15 +45,15 @@ const PLAYER_TYPES = {
   vendor: {
     id:"vendor", name:"既存SaaSベンダー", icon:"🏢",
     desc:"営業網と資金力が強み。ただし組織が重く固定費が高い。",
-    bs:  { cash:2000, softwareAsset:0, otherAsset:500, debt:0, capital:2500, retainedEarnings:0 },
-    ops: { solutionQuality:40, salesPower:60, brandAwareness:55, supportQuality:50, stores:0, setPrice:0, priceMultiplier:1.0 },
+    bs:  { cash:2000, softwareAsset:0, otherAsset:500, debt:0, capital:2500, retainedEarnings:0, loanSchedule:[] },
+    ops: { solutionQuality:40, salesPower:60, brandAwareness:55, supportQuality:50, stores:0, setPrice:0, priceMultiplier:1.0, pendingInvestment:{} },
     investRatio: 0.10, baseOpex: 200, investEfficiency: 1.0,
   },
   startup: {
     id:"startup", name:"スタートアップ", icon:"🚀",
     desc:"少ない予算でも投資効率1.8倍。集中投資で特定パラメータを一気に伸ばせる。",
-    bs:  { cash:400, softwareAsset:0, otherAsset:50, debt:0, capital:450, retainedEarnings:0 },
-    ops: { solutionQuality:55, salesPower:20, brandAwareness:20, supportQuality:35, stores:0, setPrice:0, priceMultiplier:1.0 },
+    bs:  { cash:400, softwareAsset:0, otherAsset:50, debt:0, capital:450, retainedEarnings:0, loanSchedule:[] },
+    ops: { solutionQuality:55, salesPower:20, brandAwareness:20, supportQuality:35, stores:0, setPrice:0, priceMultiplier:1.0, pendingInvestment:{} },
     investRatio: 0.12, baseOpex: 40, investEfficiency: 1.8,
   },
 };
@@ -250,6 +250,18 @@ function debtRatio(bs) {
   const ta = totalAssets(bs);
   return ta > 0 ? (totalLiabilities(bs) / ta * 100).toFixed(1) : "0.0";
 }
+// D/Eレシオ（負債/純資産）。Stage3の借入上限判定に使う
+function deRatio(bs) {
+  const eq = equity(bs);
+  return eq > 0 ? bs.debt / eq : (bs.debt > 0 ? Infinity : 0);
+}
+// 借入可能な最大額：D/Eレシオが200%を超えない範囲
+// debt + x <= 2 * equity → x <= 2*equity - debt
+function maxBorrowable(bs) {
+  const eq = equity(bs);
+  if (eq <= 0) return 0; // 純資産がマイナス/ゼロなら新規借入不可
+  return Math.max(0, Math.floor(2 * eq - bs.debt));
+}
 
 // ============================================================
 // GAME ENGINE
@@ -296,6 +308,82 @@ function calcVarCost(ops, market) {
 }
 
 // 予算配分をopsに反映（逓減カーブ付き投資効果 or 自然劣化）
+// ============================================================
+// Stage3: 借入の能動化
+// ============================================================
+const LOAN_TERM_QUARTERS = 4; // 4Q均等返済（1年）
+
+// 借入を実行：bsに新しいローンを追加し、debtとcashを増やす
+function borrowMoney(bs, amount) {
+  if (amount <= 0) return bs;
+  const quarterlyPrincipal = Math.ceil(amount / LOAN_TERM_QUARTERS);
+  const newLoan = {
+    principal: amount,
+    remainingQuarters: LOAN_TERM_QUARTERS,
+    quarterlyPrincipal,
+  };
+  return {
+    ...bs,
+    cash: bs.cash + amount,
+    debt: bs.debt + amount,
+    loanSchedule: [...(bs.loanSchedule || []), newLoan],
+  };
+}
+
+// 毎Q処理：ローンスケジュールから今Qの返済額（元本+利息）を計算する。
+// bsそのものは変更しない（cash/debtの実際の変動はprocessQuarter側で一括処理する）
+// 戻り値: { newSchedule: 更新後のローン一覧, principalPaid: 元本返済額, interestPaid: 利息額 }
+function calcLoanRepayment(bs) {
+  const schedule = bs.loanSchedule || [];
+  if (schedule.length === 0) return { newSchedule: [], principalPaid: 0, interestPaid: 0 };
+
+  let principalPaid = 0;
+  let interestPaid = 0;
+  const newSchedule = [];
+
+  schedule.forEach(loan => {
+    if (loan.remainingQuarters <= 0) return; // 完済済みは除去
+    const remainingPrincipal = loan.quarterlyPrincipal * loan.remainingQuarters;
+    const interest = Math.floor(Math.min(remainingPrincipal, loan.principal) * INTEREST_RATE);
+    const thisPrincipalPayment = Math.min(loan.quarterlyPrincipal, remainingPrincipal);
+    principalPaid += thisPrincipalPayment;
+    interestPaid += interest;
+    const remaining = loan.remainingQuarters - 1;
+    if (remaining > 0) {
+      newSchedule.push({ ...loan, remainingQuarters: remaining });
+    }
+  });
+
+  return { newSchedule, principalPaid, interestPaid };
+}
+
+// 今Q配分した投資は次Qにならないとパラメータへ反映されない。
+// pendingInvestment に積んでおき、次Q開始時にcommitする。
+// ============================================================
+
+// 前Qに積んだpendingInvestmentをパラメータへ反映する（今Q開始時に実行）
+function commitPendingInvestment(ops, investEfficiency = 1.0) {
+  const pending = ops.pendingInvestment || {};
+  let newOps = { ...ops };
+  BUDGET_ITEMS.forEach(item => {
+    const invested = pending[item.id] || 0;
+    if (invested > 0) {
+      const gain = calcParamGain(newOps[item.param], item.basePer100, invested, investEfficiency);
+      newOps[item.param] = Math.min(PARAM_MAX, newOps[item.param] + gain);
+    } else {
+      newOps[item.param] = Math.max(0, newOps[item.param] - item.decay);
+    }
+  });
+  newOps.pendingInvestment = {}; // 反映済みなのでクリア
+  return newOps;
+}
+
+// 今Q配分した額をpendingInvestmentとして積む（パラメータには反映しない）
+function queuePendingInvestment(ops, allocation) {
+  return { ...ops, pendingInvestment: { ...allocation } };
+}
+
+// 旧関数：即時反映版（NPC・互換性のために残す）
 function applyBudgetAllocation(ops, allocation, investEfficiency = 1.0) {
   let newOps = { ...ops };
   BUDGET_ITEMS.forEach(item => {
@@ -416,10 +504,13 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
   const investEfficiency = pt?.investEfficiency || 1.0;
   const baseOpex = pt?.baseOpex || 100;
 
-  // --- Player: 予算配分適用（investEfficiency込み）---
-  let pOps = applyBudgetAllocation(playerOps, playerAlloc, investEfficiency);
+  // --- Player: Stage1 時間差反映 ---
+  // ①前Qに積んだpendingInvestmentを今Qのパラメータへcommit
+  let pOps = commitPendingInvestment(playerOps, investEfficiency);
+  // ②今Q配分した額は来Qまでパラメータに反映されない。pendingとして積むだけ
+  pOps = queuePendingInvestment(pOps, playerAlloc);
 
-  // --- Player: 特別アクション ---
+  // --- Player: 特別アクション（即時効果）---
   let pBs = { ...playerBs };
   let sgaAdd = 0, capitalizeAmt = 0;
   if (playerSpecial && (!SPECIAL_ACTIONS[playerSpecial]?.oneTime || !usedSpecials.includes(playerSpecial))) {
@@ -427,7 +518,7 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
     pBs = r.bs; pOps = r.ops; sgaAdd = r.sgaAdd; capitalizeAmt = r.capitalizeAmt;
   }
 
-  // --- NPC: 予算配分（BS連動）---
+  // --- NPC: 予算配分（BS連動、同じく時間差反映）---
   const npcProcessed = npcs.map(n => {
     const nPt = PLAYER_TYPES[n.type];
     const nSafetyBuffer = (nPt?.baseOpex || 100) * 2;
@@ -440,7 +531,9 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
     } else {
       alloc = { sales: nBudget*0.1, dev: nBudget*0.5, marketing: nBudget*0.1, price: nBudget*0.15, cs: nBudget*0.15 };
     }
-    const nOps = applyBudgetAllocation(n.ops, alloc, nEff);
+    // ①前Qのpendingをcommit ②今Qの配分をpendingとして積む
+    let nOps = commitPendingInvestment(n.ops, nEff);
+    nOps = queuePendingInvestment(nOps, alloc);
     const nSpecial = Math.random() < 0.40 ? (n.strategy==="sales_heavy"?"chain_deal":"line_collab") : null;
     let nBs = {...n.bs};
     if (nSpecial) { const r = applySpecialAction(nBs, nOps, nSpecial, []); nBs = r.bs; }
@@ -462,8 +555,12 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
   const dep = Math.floor(pBs.softwareAsset * SW_DEP_RATE);
   pBs.softwareAsset -= dep;
 
-  // 利息
-  const interest = Math.floor(pBs.debt * INTEREST_RATE);
+  // ★ Stage3: ローンスケジュールに基づく返済額を計算（bsはまだ変更しない）
+  const loanCalc = calcLoanRepayment(pBs);
+  const interest = loanCalc.interestPaid;       // PLに計上される費用
+  const principalPaid = loanCalc.principalPaid; // PLを通らないBSのみの資金移動
+  pBs.loanSchedule = loanCalc.newSchedule;
+  pBs.debt = Math.max(0, pBs.debt - principalPaid);
 
   // 予算投資額の分類（費用 or 資産計上）
   let allocSga = 0, allocCapitalize = 0;
@@ -488,17 +585,19 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
   const netIncome       = operatingProfit - interest;
 
   // ★ BS整合：
-  // cash変動   = rev - cogs - varCost - opex - allocSga - sgaAdd - allocCapitalize - interest
+  // cash変動   = rev - cogs - varCost - opex - allocSga - sgaAdd - allocCapitalize - interest - principalPaid
   // retainedΔ = rev - cogs - varCost - opex - allocSga - sgaAdd - dep - interest  (= netIncome)
+  // debtΔ      = -principalPaid
   // swAssetΔ  = allocCapitalize - dep
-  // totalAssetsΔ = cashΔ + swΔ = netIncome ✓ → 純資産Δ(=retainedΔ)と一致
-  pBs.cash += revenue - cogs - varCost - baseOpex - allocSga - sgaAdd - allocCapitalize - interest;
+  // totalAssetsΔ = cashΔ + swΔ = netIncome - principalPaid
+  // 負債純資産側Δ = retainedΔ + debtΔ = netIncome - principalPaid ✓ 一致
+  pBs.cash += revenue - cogs - varCost - baseOpex - allocSga - sgaAdd - allocCapitalize - interest - principalPaid;
   pBs.retainedEarnings += netIncome; // netIncome = rev-cogs-varCost-opex-allocSga-sgaAdd-dep-interest
 
   const pl = {
     revenue, cogs, grossProfit, varCost,
     allocSga, allocCapitalize, sgaAdd, opex: baseOpex, totalSga,
-    depAmt: dep, interestExpense: interest,
+    depAmt: dep, interestExpense: interest, principalPaid,
     operatingProfit, netIncome,
     competResult: pResult,
     phase: phase.name,
@@ -528,6 +627,7 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
     const nAllocSga = nInvestTotal - nAllocCap;
     nBs.softwareAsset += nAllocCap;
 
+    // NPC: 借入アクションは取らない設計（Stage3の対象外）。debt=0のままなのでnIntは常に0
     const nInt = Math.floor(nBs.debt * INTEREST_RATE);
     const nRev = calcRevenue(nFinalOps, market);
     const nCogs = Math.floor(nRev * 0.25);
@@ -839,7 +939,7 @@ function BudgetAllocator({ availableBudget, allocation, onChange, bs, playerType
     <div>
       <div style={{marginBottom:12,padding:"10px 14px",background:C.bg,borderRadius:8,border:`1px solid ${C.border}`}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
-          <Label>今Q投資可能上限</Label>
+          <Label>今Q配分可能額</Label>
           <span style={{fontSize:15,fontWeight:900,color:C.cyan,fontFamily:"'Courier New',monospace"}}>¥{availableBudget}万</span>
         </div>
         <div style={{fontSize:10,color:C.muted}}>
@@ -856,6 +956,10 @@ function BudgetAllocator({ availableBudget, allocation, onChange, bs, playerType
           <div style={{width:`${Math.min(100,total/Math.max(availableBudget,1)*100)}%`,height:"100%",
             background:remaining<0?C.red:C.cyan,borderRadius:3,transition:"width 0.2s"}}/>
         </div>
+      </div>
+      <div style={{marginBottom:10,padding:"8px 12px",background:`${C.purple}10`,border:`1px solid ${C.purple}33`,borderRadius:8,display:"flex",gap:8,alignItems:"center"}}>
+        <span style={{fontSize:14}}>⏳</span>
+        <span style={{fontSize:10,color:C.muted}}>今Qの投資は<b style={{color:C.purple}}>来Qから</b>パラメータに反映されます（即時効果ではありません）</span>
       </div>
       <div style={{display:"grid",gap:8}}>
         {BUDGET_ITEMS.map(item => {
@@ -889,7 +993,7 @@ function BudgetAllocator({ availableBudget, allocation, onChange, bs, playerType
                     <span style={{fontSize:10,color:C.muted}}>{item.desc}</span>
                     <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",marginLeft:8,flexShrink:0}}>
                       <span style={{fontSize:11,fontWeight:700,color:gain>0?C.green:C.red}}>
-                        {paramLabels[item.param]||item.param} {gain>0?"+":""}{Number(gain).toFixed(1)}
+                        来Q {paramLabels[item.param]||item.param} {gain>0?"+":""}{Number(gain).toFixed(1)}
                       </span>
                       {item.capitalize && <span style={{fontSize:9,color:C.purple}}>資産計上（PL影響なし）</span>}
                     </div>
@@ -983,6 +1087,158 @@ function SpecialActionSelector({ selected, onSelect, usedSpecials, playerType, a
 // ============================================================
 // BS TABLE
 // ============================================================
+// ============================================================
+// BS BUILD ANIMATION：バランスシートが組まれていく過程を可視化
+// ============================================================
+function BSBuildAnimation({ bs, quarter }) {
+  const [step, setStep] = useState(0);
+  const ta = totalAssets(bs), tl = totalLiabilities(bs), eq = equity(bs);
+
+  const assetRows = [
+    { label:"現預金", value: bs.cash },
+    { label:"ソフトウェア資産", value: bs.softwareAsset },
+    { label:"その他資産", value: bs.otherAsset },
+  ];
+  const liabEqRows = [
+    { label:"借入金", value: bs.debt, dim: bs.debt === 0 },
+    { label:"資本金", value: bs.capital },
+    { label:"利益剰余金", value: bs.retainedEarnings, warn: bs.retainedEarnings < 0 },
+  ];
+  // ★ ステップ設計：資産3行→負債3行→合計2つ→チェック演出 の計9ステップ
+  //   左右を時間差で出すことで「資産が先に組まれ、それを支える負債純資産が後から積まれる」という見せ方にする
+  const ASSET_STEPS = assetRows.length;                    // 1〜3
+  const LIABEQ_STEPS = ASSET_STEPS + liabEqRows.length;     // 4〜6
+  const TOTALS_STEP = LIABEQ_STEPS + 1;                     // 7
+  const CHECK_STEP = TOTALS_STEP + 1;                       // 8
+  const totalSteps = CHECK_STEP;
+
+  useEffect(() => {
+    setStep(0);
+    let current = 0;
+    const timer = setInterval(() => {
+      current += 1;
+      setStep(current);
+      if (current >= totalSteps) clearInterval(timer);
+    }, 380);
+    return () => clearInterval(timer);
+  }, [bs.cash, bs.softwareAsset, bs.retainedEarnings, quarter, totalSteps]);
+
+  const visibleAssets = assetRows.slice(0, Math.min(step, ASSET_STEPS));
+  const visibleLiabEq = liabEqRows.slice(0, Math.max(0, Math.min(step - ASSET_STEPS, liabEqRows.length)));
+  const showTotals = step >= TOTALS_STEP;
+  const showCheck = step >= CHECK_STEP;
+  const isDone = step >= totalSteps;
+
+  const rowStyle = (i, list) => ({
+    display:"flex", justifyContent:"space-between", padding:"4px 0",
+    borderBottom:`1px solid ${C.border}`,
+    opacity: i === list.length - 1 ? 0 : 1,
+    animation: i === list.length - 1 ? "slideInRight 0.3s ease-out forwards" : "none",
+  });
+
+  return (
+    <Panel style={{marginBottom:14}}>
+      <div style={{display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:10}}>
+        <Label>⚖️ バランスシートを確認</Label>
+        {!isDone && (
+          <button onClick={() => setStep(totalSteps)} style={{
+            background:"none", border:"none", color:C.muted, fontSize:10,
+            cursor:"pointer", opacity:0.6, textDecoration:"underline",
+          }}>
+            スキップ
+          </button>
+        )}
+      </div>
+
+      <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:10}}>
+        {/* 資産の部 */}
+        <div style={{background:C.bg, borderRadius:8, padding:12, border:`1px solid ${C.border}`}}>
+          <Label style={{display:"block", marginBottom:8}}>資産の部</Label>
+          {visibleAssets.map((r, i) => (
+            <div key={r.label} style={rowStyle(i, visibleAssets)}>
+              <span style={{fontSize:11, color:C.muted}}>{r.label}</span>
+              <span style={{fontSize:11, fontFamily:"'Courier New',monospace", fontWeight:700, color:C.text}}>
+                ¥{r.value.toLocaleString()}万
+              </span>
+            </div>
+          ))}
+          {showTotals && (
+            <div style={{
+              display:"flex", justifyContent:"space-between", padding:"8px 0 0", marginTop:4,
+              borderTop:`2px solid ${C.cyan}55`, opacity:0,
+              animation:"slideInRight 0.35s ease-out forwards",
+            }}>
+              <span style={{fontSize:12, fontWeight:800, color:C.cyan}}>資産合計</span>
+              <span style={{fontSize:14, fontWeight:900, color:C.cyan, fontFamily:"'Courier New',monospace"}}>
+                ¥{ta.toLocaleString()}万
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* 負債・純資産の部 */}
+        <div style={{background:C.bg, borderRadius:8, padding:12, border:`1px solid ${C.border}`}}>
+          <Label style={{display:"block", marginBottom:8}}>負債・純資産の部</Label>
+          {visibleLiabEq.map((r, i) => (
+            <div key={r.label} style={rowStyle(i, visibleLiabEq)}>
+              <span style={{fontSize:11, color:C.muted}}>{r.label}</span>
+              <span style={{
+                fontSize:11, fontFamily:"'Courier New',monospace", fontWeight:700,
+                color: r.warn ? C.red : r.dim ? C.muted : C.text,
+              }}>
+                ¥{r.value.toLocaleString()}万
+              </span>
+            </div>
+          ))}
+          {showTotals && (
+            <div style={{
+              display:"flex", justifyContent:"space-between", padding:"8px 0 0", marginTop:4,
+              borderTop:`2px solid ${C.cyan}55`, opacity:0,
+              animation:"slideInRight 0.35s ease-out forwards",
+            }}>
+              <span style={{fontSize:12, fontWeight:800, color:C.cyan}}>負債純資産合計</span>
+              <span style={{fontSize:14, fontWeight:900, color:C.cyan, fontFamily:"'Courier New',monospace"}}>
+                ¥{(tl+eq).toLocaleString()}万
+              </span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* バランスチェック演出：実際の整合性を検証して表示 */}
+      {showCheck && (() => {
+        const isBalanced = Math.abs(ta - (tl + eq)) < 1; // 四捨五入誤差を許容
+        return (
+          <div className="sb-popin" style={{
+            marginTop:14, textAlign:"center", padding:"10px 0",
+            background: isBalanced ? `${C.green}10` : `${C.red}10`,
+            border: `1px solid ${isBalanced ? C.green : C.red}33`, borderRadius:10,
+          }}>
+            <span style={{fontSize:14, fontWeight:900, color: isBalanced ? C.green : C.red}}>
+              {isBalanced
+                ? "✅ Balanced — 資産合計と負債純資産合計が一致"
+                : `⚠️ 不一致を検出（差額¥${(Math.round(ta-(tl+eq)) || 0).toLocaleString()}万）`}
+            </span>
+          </div>
+        );
+      })()}
+
+      {!isDone && (
+        <div style={{display:"flex", justifyContent:"center", marginTop:10}}>
+          <div style={{display:"flex", gap:4}}>
+            {[0,1,2].map(i => (
+              <div key={i} style={{
+                width:5, height:5, borderRadius:"50%", background:C.cyan,
+                animation:`pulseGlow 0.9s ease-in-out ${i*0.15}s infinite`,
+              }}/>
+            ))}
+          </div>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
 function BSTable({bs}) {
   const ta=totalAssets(bs), tl=totalLiabilities(bs), eq=equity(bs);
   const Row=({label,val,bold,color})=>(
@@ -1033,7 +1289,7 @@ function BSTable({bs}) {
 // ============================================================
 // PL BUILD ANIMATION：決算が組まれていく過程を可視化
 // ============================================================
-function PLBuildAnimation({ pl, quarter }) {
+function PLBuildAnimation({ pl, quarter, onComplete }) {
   const [step, setStep] = useState(0);
 
   // 表示する行（小計を都度計算）
@@ -1068,12 +1324,15 @@ function PLBuildAnimation({ pl, quarter }) {
   //   quarterだけに依存すると同一Q内での再表示時にアニメーションが動かない
   useEffect(() => {
     setStep(0);
-    if (totalSteps === 0) return;
+    if (totalSteps === 0) { if (onComplete) onComplete(); return; }
     let current = 0;
     const timer = setInterval(() => {
       current += 1;
       setStep(current);
-      if (current >= totalSteps) clearInterval(timer);
+      if (current >= totalSteps) {
+        clearInterval(timer);
+        if (onComplete) onComplete();
+      }
     }, 420);
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1097,7 +1356,7 @@ function PLBuildAnimation({ pl, quarter }) {
       <div style={{display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:10}}>
         <Label>📋 決算が組まれていく...</Label>
         {!isDone && (
-          <button onClick={() => setStep(computedRows.length)} style={{
+          <button onClick={() => { setStep(computedRows.length); if (onComplete) onComplete(); }} style={{
             background:"none", border:"none", color:C.muted, fontSize:10,
             cursor:"pointer", opacity:0.6, textDecoration:"underline",
           }}>
@@ -1132,7 +1391,7 @@ function PLBuildAnimation({ pl, quarter }) {
                   : (r.kind === "minus" ? C.orange : isSubtotal ? C.text : C.green),
               }}>
                 {r.display >= 0 && r.kind !== "minus" ? "+" : ""}
-                {Math.round(r.display).toLocaleString()}万
+                {(Math.round(r.display) || 0).toLocaleString()}万
               </span>
             </div>
           );
@@ -1952,6 +2211,8 @@ export default function App() {
   const [npcs,setNpcs]           = useState([]);
   const [quarter,setQuarter]     = useState(1);
   const [allocation,setAllocation] = useState({sales:0,dev:0,marketing:0,price:0,cs:0});
+  const [investTarget,setInvestTarget] = useState(null); // Stage2: 今期の投資目標額（未入力=null）
+  const [showBorrowPanel,setShowBorrowPanel] = useState(false); // Stage3: 借入確認パネルの表示
   const [prevAllocation,setPrevAllocation] = useState({sales:0,dev:0,marketing:0,price:0,cs:0});
   const [specialAction,setSpecialAction] = useState(null);
   const [usedSpecials,setUsedSpecials]   = useState([]);
@@ -1959,11 +2220,13 @@ export default function App() {
   const [lastEvent,setLastEvent] = useState(null);
   const [lastNetIncome,setLastNetIncome] = useState(0);
   const [prevNpcOps,setPrevNpcOps] = useState({});
+  const [prevOps,setPrevOps] = useState(null); // Stage1: 自分のパラメータ変化表示用
   const [narratives,setNarratives] = useState([]);
   const [pendingChoice,setPendingChoice]   = useState(null);
   const [activeEffects,setActiveEffects]   = useState([]);
   const [permanentOpexExtra,setPermanentOpexExtra] = useState(0);
   const [pendingPrice,setPendingPrice]     = useState(null); // 年次価格設定待ち
+  const [bsAnimReady,setBsAnimReady]       = useState(false); // BSアニメーション開始フラグ
   const [tab,setTab]             = useState("budget");
   const [history,setHistory]     = useState([]);
 
@@ -2021,6 +2284,7 @@ export default function App() {
           };
         });
       if (otherPlayers.length > 0) setNpcs(otherPlayers);
+      setBsAnimReady(false); // オンライン同期でresult画面に入る際もアニメーションを最初から
       setScreen("result");
     }
 
@@ -2086,8 +2350,9 @@ export default function App() {
       const eff = pt?.investEfficiency || 1.0;
       const baseOpex = pt?.baseOpex || 100;
 
-      // パラメータ更新
-      let pOps = applyBudgetAllocation(pState.ops, alloc, eff);
+      // ★ Stage1: 時間差反映（前Qのpendingをcommit→今Qの配分をpendingへ積む）
+      let pOps = commitPendingInvestment(pState.ops, eff);
+      pOps = queuePendingInvestment(pOps, alloc);
       let pBs = {...pState.bs};
       let sgaAdd = 0, capitalizeAmt = 0;
 
@@ -2194,13 +2459,33 @@ export default function App() {
 
   // BS連動型投資上限（継続効果のinvestBonusも加算）
   const investBonusFromEffects = activeEffects.filter(e=>e.type==="investBonus").reduce((s,e)=>s+e.value,0);
-  const availableBudget = bs ? calcInvestCapacity(bs, playerType, lastNetIncome) + investBonusFromEffects : 0;
+  // ★ Stage2: 自己資金だけで出せる上限（旧availableBudgetの実体）
+  const selfFundCapacity = bs ? calcInvestCapacity(bs, playerType, lastNetIncome) + investBonusFromEffects : 0;
+  // 投資目標額（未入力ならデフォルトで自己資金上限と同額にしておく＝従来の挙動を維持）
+  const effectiveTarget = investTarget != null ? investTarget : selfFundCapacity;
+  // 不足額（Stage3で借入により解消される想定。現時点では配分可能額はselfFundCapacityに制限）
+  const shortfall = Math.max(0, effectiveTarget - selfFundCapacity);
+  // 実際に配分に使える額（自己資金上限とtargetの小さい方）
+  const availableBudget = Math.min(effectiveTarget, selfFundCapacity);
   const allocTotal = Object.values(allocation).reduce((s,v)=>s+v,0);
   const canExecute = allocTotal <= availableBudget;
+
+  // Stage3: 借入を実行する
+  function doBorrow(amount) {
+    if (!bs || amount <= 0) return;
+    const limit = maxBorrowable(bs);
+    const actualAmount = Math.min(amount, limit);
+    if (actualAmount <= 0) return;
+    setBs(b => borrowMoney(b, actualAmount));
+    setShowBorrowPanel(false);
+  }
 
   function executeQuarter() {
     if (!canExecute) return;
     const market = MARKETS[marketId];
+
+    // ★ Stage1: 今Qの開始時点のops（commit前）を保存。result画面で「前Q投資の反映」を見せるため
+    setPrevOps({...ops});
 
     // ランダムイベント抽選（選択型は別処理）
     let ev = null;
@@ -2325,6 +2610,7 @@ export default function App() {
       setLastNetIncome(pl.netIncome); setNarratives(newNarratives2);
       setActiveEffects(newActiveEffects);
       setPrevAllocation(allocation); setAllocation({...allocation}); setSpecialAction(null);
+      setInvestTarget(null); // Stage2: 次Qは自己資金上限を基準にリセット
       setPendingChoice(ev); // 選択画面へ
       setScreen("choice");
       return;
@@ -2342,6 +2628,7 @@ export default function App() {
     setLastNetIncome(pl.netIncome); setNarratives(newNarratives);
     setActiveEffects(newActiveEffects);
     setPrevAllocation(allocation); setAllocation({...allocation}); setSpecialAction(null);
+    setInvestTarget(null); // Stage2: 次Qは自己資金上限を基準にリセット
     goToResultOrForecast(pl);
   }
 
@@ -2382,6 +2669,7 @@ export default function App() {
 
   // result画面へ遷移（決算組成アニメーションはresult画面冒頭で実施）
   function goToResultOrForecast(pl) {
+    setBsAnimReady(false); // BSアニメーションを最初から見せるためリセット
     setScreen("result");
   }
 
@@ -2737,7 +3025,7 @@ export default function App() {
           <button onClick={()=>{
             setScreen("lobby");setMarketId(null);setPlayerType(null);setBs(null);setOps(null);
             setQuarter(1);setUsedSpecials([]);setHistory([]);setLastPL(null);setLastEvent(null);
-            setLastNetIncome(0);setPrevNpcOps({});setNarratives([]);
+            setLastNetIncome(0);setPrevNpcOps({});setNarratives([]);setPrevOps(null);setInvestTarget(null);
             setAllocation({sales:0,dev:0,marketing:0,price:0,cs:0});
             setOnlineMode(false);setOnlineInfo(null);
             setPendingChoice(null);setPendingPrice(null);setActiveEffects([]);setPermanentOpexExtra(0);
@@ -2844,7 +3132,40 @@ export default function App() {
             );
           })()}
 
-          <PLBuildAnimation pl={lastPL} quarter={quarter}/>
+          <PLBuildAnimation pl={lastPL} quarter={quarter} onComplete={() => setBsAnimReady(true)}/>
+
+          {bsAnimReady && <BSBuildAnimation bs={bs} quarter={quarter}/>}
+
+          {/* Stage1: 前Q投資の反映を可視化 */}
+          {bsAnimReady && prevOps && (() => {
+            const changes = [
+              ["👥 営業力", "salesPower", C.cyan],
+              ["⚙️ 品質", "solutionQuality", C.purple],
+              ["📢 ブランド", "brandAwareness", C.yellow],
+              ["🎧 CS", "supportQuality", C.orange],
+            ].map(([label, key, color]) => ({
+              label, color, diff: ops[key] - prevOps[key],
+            })).filter(c => Math.abs(c.diff) >= 0.05);
+
+            if (changes.length === 0) return null;
+            return (
+              <Panel style={{marginBottom:14}}>
+                <Label style={{display:"block",marginBottom:10}}>⏳ 前Qの投資が反映されました</Label>
+                <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
+                  {changes.map(c => (
+                    <span key={c.label} style={{
+                      fontSize:11, fontWeight:700,
+                      color: c.diff >= 0 ? c.color : C.red,
+                      background: `${c.diff >= 0 ? c.color : C.red}18`,
+                      padding:"4px 10px", borderRadius:20,
+                    }}>
+                      {c.label} {c.diff >= 0 ? "+" : ""}{c.diff.toFixed(1)}
+                    </span>
+                  ))}
+                </div>
+              </Panel>
+            );
+          })()}
 
           {/* 競争内訳：アニメーション演出版 */}
           <BattleResultCard
@@ -3018,6 +3339,82 @@ export default function App() {
         {/* BUDGET TAB */}
         {tab==="budget" && (
           <>
+            {/* Stage2: 投資目標額の入力 */}
+            <Panel style={{marginBottom:14}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
+                <Label>🎯 今期の投資目標額</Label>
+                <span style={{fontSize:10,color:C.muted}}>自己資金上限: ¥{selfFundCapacity}万</span>
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:10}}>
+                <span style={{fontSize:14,color:C.muted}}>¥</span>
+                <input
+                  type="number" inputMode="numeric"
+                  value={investTarget ?? selfFundCapacity}
+                  onChange={e => {
+                    const v = Math.max(0, Number(e.target.value) || 0);
+                    setInvestTarget(v);
+                  }}
+                  style={{
+                    flex:1, background:C.bg, border:`2px solid ${shortfall>0?C.red:C.cyan}`, borderRadius:8,
+                    padding:"10px 14px", color:C.text, fontSize:18, fontWeight:800,
+                    fontFamily:"'Courier New',monospace", outline:"none", textAlign:"right",
+                  }}
+                />
+                <span style={{fontSize:12,color:C.muted,flexShrink:0}}>万円</span>
+              </div>
+              {shortfall > 0 ? (
+                <div style={{marginTop:10,padding:"8px 12px",background:`${C.red}12`,border:`1px solid ${C.red}44`,borderRadius:8,fontSize:11,color:C.red}}>
+                  ⚠️ 自己資金だけでは¥{shortfall}万足りません。
+                  <br/>今期は自己資金上限の¥{availableBudget}万までしか配分できません。
+                  <button onClick={() => setShowBorrowPanel(v => !v)} style={{
+                    marginTop:8, width:"100%", padding:"8px 0", borderRadius:8, border:`1px solid ${C.cyan}`,
+                    background:`${C.cyan}15`, color:C.cyan, fontSize:11, fontWeight:700, cursor:"pointer",
+                  }}>
+                    🏦 借入で補う →
+                  </button>
+                </div>
+              ) : (
+                <div style={{marginTop:8,fontSize:10,color:C.muted}}>
+                  自己資金で目標を満たせます（¥{availableBudget}万を配分可能）
+                </div>
+              )}
+
+              {/* Stage3: 借入確認パネル */}
+              {showBorrowPanel && (() => {
+                const limit = maxBorrowable(bs);
+                const suggested = Math.min(shortfall, limit);
+                const de = deRatio(bs);
+                const canBorrowEnough = limit >= shortfall;
+                return (
+                  <div style={{marginTop:10, padding:"12px", background:C.bg, border:`1px solid ${C.cyan}44`, borderRadius:8}}>
+                    <div style={{fontSize:11, color:C.muted, marginBottom:8}}>
+                      現在のD/Eレシオ: {de===Infinity?"∞":(de*100).toFixed(0)+"%"}（上限200%）
+                      <br/>借入可能上限: ¥{limit}万
+                    </div>
+                    {limit <= 0 ? (
+                      <div style={{fontSize:11, color:C.red}}>
+                        ⚠️ D/Eレシオが上限に達しているため、これ以上借入できません。
+                      </div>
+                    ) : (
+                      <>
+                        <div style={{fontSize:11, color:C.text, marginBottom:8}}>
+                          ¥{suggested}万を借入（4Q均等返済、金利{(INTEREST_RATE*100).toFixed(0)}%/Q）
+                          {!canBorrowEnough && <span style={{color:C.orange}}>　※不足分を全額カバーできません</span>}
+                        </div>
+                        <button onClick={() => doBorrow(suggested)} style={{
+                          width:"100%", padding:"10px 0", borderRadius:8, border:"none",
+                          background:`linear-gradient(135deg,#006080,${C.cyan})`, color:"#fff",
+                          fontSize:12, fontWeight:700, cursor:"pointer",
+                        }}>
+                          ¥{suggested}万を借入する
+                        </button>
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
+            </Panel>
+
             <Panel style={{marginBottom:14}}>
               <div style={{marginBottom:12,padding:"8px 12px",background:C.bg,borderRadius:8,fontSize:11,color:C.muted,lineHeight:1.6}}>
                 💡 未投資の項目は毎Q自動で劣化します。すべてに配分する予算はありません。何を伸ばし、何を犠牲にするか。
@@ -3108,6 +3505,32 @@ export default function App() {
           <>
             <Label style={{display:"block",marginBottom:12}}>貸借対照表（現在）</Label>
             <BSTable bs={bs}/>
+
+            {/* Stage3: 返済スケジュール */}
+            {bs.loanSchedule && bs.loanSchedule.length > 0 && (
+              <Panel style={{marginTop:14}}>
+                <Label style={{display:"block",marginBottom:10}}>🏦 返済スケジュール</Label>
+                <div style={{display:"grid", gap:8}}>
+                  {bs.loanSchedule.map((loan, i) => (
+                    <div key={i} style={{
+                      display:"flex", justifyContent:"space-between", alignItems:"center",
+                      background:C.bg, borderRadius:8, padding:"8px 12px", border:`1px solid ${C.border}`,
+                    }}>
+                      <span style={{fontSize:11, color:C.muted}}>
+                        借入¥{loan.principal}万（残り{loan.remainingQuarters}Q）
+                      </span>
+                      <span style={{fontSize:12, fontWeight:700, color:C.orange, fontFamily:"'Courier New',monospace"}}>
+                        ¥{loan.quarterlyPrincipal}万/Q
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <div style={{marginTop:8, fontSize:10, color:C.muted}}>
+                  D/Eレシオ: {(() => { const de = deRatio(bs); return de===Infinity ? "∞" : (de*100).toFixed(0)+"%"; })()}（上限200%）
+                </div>
+              </Panel>
+            )}
+
             {history.length>0&&(
               <Panel style={{marginTop:14}}>
                 <Label style={{display:"block",marginBottom:10}}>総資産推移</Label>
@@ -3134,6 +3557,11 @@ export default function App() {
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
             <Panel>
               <Label style={{display:"block",marginBottom:12}}>競争力パラメータ（vs 競合）</Label>
+              {Object.values(allocation||{}).some(v=>v>0) && (
+                <div style={{marginBottom:10,padding:"6px 10px",background:`${C.purple}10`,border:`1px solid ${C.purple}33`,borderRadius:6,fontSize:10,color:C.purple}}>
+                  ⏳ 今Q投資中の分は来Qから反映されます
+                </div>
+              )}
               {[["⚙️ ソリューション品質","solutionQuality",C.purple],
                 ["👥 営業力","salesPower",C.cyan],
                 ["📢 ブランド認知","brandAwareness",C.yellow],
