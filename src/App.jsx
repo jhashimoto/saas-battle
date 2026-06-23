@@ -998,13 +998,14 @@ function CharacterSprite({ type, mood = "normal", scale = 1 }) {
 
 // ============================================================
 // BATTLE BOARD SCENE：陣取り合戦・専用フルスクリーンシーン
-// 各陣営を「専用バンド」に固定し、キャラの位置とマスの位置を完全に一致させる
+// 1本の横長バーを[NPC1陣地][あなた陣地][NPC2陣地][未開拓]の順に分割し、
+// 各陣営の境界（陣地の最前線）にキャラクターを立たせる。
+// 陣地が伸び縮みするとキャラの立ち位置も連動して動くため、
+// 「押し込んでいる/押し込まれている」が直感的に伝わる。
 // ============================================================
 function BattleBoardScene({ npcs, prevPlayerStores, finalPlayerStores, competResult, market, quarter, onContinue }) {
   const cr = competResult || {};
-  const COLS = 10; // 1バンドあたりの横マス数（シェアの濃淡を表現）
-  const COLORS = { filled:"#00C8D4", empty:"#1B2733" };
-  const BAND_COLORS = { player:"#00C8D4", npc1:"#E24B4A", npc2:"#3FB950" };
+  const BAND_COLORS = { player:"#00C8D4", npc1:"#E24B4A", npc2:"#3FB950", none:"#30363D" };
 
   const totalAvail = Math.max(1, Math.floor(market.totalStores * marketPenetration(quarter)));
   const npc1 = npcs[0], npc2 = npcs[1];
@@ -1014,11 +1015,20 @@ function BattleBoardScene({ npcs, prevPlayerStores, finalPlayerStores, competRes
   const prevNpc1Stores = Math.max(0, npc1Stores - (cr.stolenBreakdown?.[npc1?.id]||0) + (cr.lostBreakdown?.[npc1?.id]||0));
   const prevNpc2Stores = Math.max(0, npc2Stores - (cr.stolenBreakdown?.[npc2?.id]||0) + (cr.lostBreakdown?.[npc2?.id]||0));
 
-  // 各陣営の「自分の市場内シェア」をそのバンド内のマス数に変換（他陣営とは独立、自分の占有率のみ表現）
-  function fillCount(stores) {
-    const ratio = Math.min(1, stores / totalAvail);
-    return Math.min(COLS, Math.max(0, Math.round(ratio * COLS)));
+  // 各陣営の幅(%)を計算：[NPC1][あなた][NPC2][未開拓]の順で並べる
+  function calcWidths(playerS, npc1S, npc2S) {
+    const sum = playerS + npc1S + npc2S;
+    const claimed = Math.min(100, (sum/totalAvail)*100);
+    if (sum === 0) return { npc1:0, player:0, npc2:0, none:100 };
+    const npc1Pct = claimed * (npc1S/sum);
+    const playerPct = claimed * (playerS/sum);
+    const npc2Pct = claimed * (npc2S/sum);
+    const nonePct = Math.max(0, 100 - npc1Pct - playerPct - npc2Pct);
+    return { npc1:npc1Pct, player:playerPct, npc2:npc2Pct, none:nonePct };
   }
+
+  const prevW = calcWidths(prevPlayerStores, prevNpc1Stores, prevNpc2Stores);
+  const finalW = calcWidths(finalPlayerStores, npc1Stores, npc2Stores);
 
   const events = [
     cr.stolenBreakdown?.[npc1?.id] > 0 && { from:"npc1", to:"player", amount:cr.stolenBreakdown[npc1.id], label:`${npc1?.name}から奪取` },
@@ -1051,6 +1061,8 @@ function BattleBoardScene({ npcs, prevPlayerStores, finalPlayerStores, competRes
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quarter]);
 
+  const w = showFinal ? finalW : prevW;
+
   const moodFor = (prev, fin) => fin > prev ? "happy" : fin < prev ? "worried" : "normal";
   const playerMood = showFinal ? moodFor(prevPlayerStores, finalPlayerStores) : "normal";
   const npc1Mood = showFinal ? moodFor(prevNpc1Stores, npc1Stores) : "normal";
@@ -1058,69 +1070,99 @@ function BattleBoardScene({ npcs, prevPlayerStores, finalPlayerStores, competRes
 
   const currentEvent = eventIdx >= 0 && eventIdx < events.length ? events[eventIdx] : null;
 
-  const cellSize = 28, gap = 3;
-  const bandW = COLS * (cellSize+gap);
+  // 各陣営の「境界位置」（バー上の%）：左から[NPC1][あなた][NPC2][未開拓]の順
+  const npc1End = w.npc1;
+  const playerEnd = w.npc1 + w.player;
+  const npc2End = w.npc1 + w.player + w.npc2;
 
-  // 1陣営分のバンド（キャラ＋マス目）を描く部品
-  function Band({ type, mood, name, prevStores, finalStores }) {
-    const count = showFinal ? fillCount(finalStores) : fillCount(prevStores);
-    const color = BAND_COLORS[type];
-    const diff = finalStores - prevStores;
-    return (
-      <div style={{display:"flex", alignItems:"center", gap:12, marginBottom:14}}>
-        {/* キャラクター（このバンドの左側に固定） */}
-        <div style={{display:"flex", flexDirection:"column", alignItems:"center", width:64, flexShrink:0}}>
-          <svg width={type==="player"?60:50} height={type==="player"?68:58}
-               viewBox={type==="player" ? "-45 -75 90 95" : "-40 -68 80 88"}>
-            <CharacterSprite type={type} mood={mood} scale={type==="player"?0.85:0.68}/>
-          </svg>
-          <div style={{fontSize:9, color, fontWeight:700, marginTop:2, textAlign:"center", lineHeight:1.2}}>{name}</div>
-        </div>
-
-        {/* このバンド専用のマス目（自分のシェアのみ表示） */}
-        <div style={{flex:1}}>
-          <svg width={bandW} height={cellSize}>
-            {Array.from({length:COLS}).map((_, i) => (
-              <rect key={i}
-                x={i*(cellSize+gap)} y={0}
-                width={cellSize} height={cellSize} rx="3"
-                fill={i < count ? color : "#1B2733"}
-                opacity={i < count ? 0.9 : 1}
-                style={{transition:"fill 0.5s ease"}}
-              />
-            ))}
-          </svg>
-          {showFinal && (
-            <div style={{display:"flex", gap:8, marginTop:4, alignItems:"baseline"}}>
-              <span style={{fontSize:15, fontWeight:900, color:C.text, fontFamily:"'Courier New',monospace"}}>{finalStores}店</span>
-              <span style={{fontSize:11, fontWeight:700, color: diff>=0?C.green:C.red}}>
-                {diff>=0?"+":""}{diff}
-              </span>
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
+  const barHeight = 56;
 
   return (
     <div style={bgBase}>
-      <div style={{maxWidth:480, margin:"0 auto", padding:"32px 20px", minHeight:"100vh", display:"flex", flexDirection:"column"}}>
-        <div style={{textAlign:"center", marginBottom:20}}>
+      <div style={{maxWidth:520, margin:"0 auto", padding:"32px 20px", minHeight:"100vh", display:"flex", flexDirection:"column"}}>
+        <div style={{textAlign:"center", marginBottom:24}}>
           <div style={{fontSize:11, letterSpacing:4, color:C.purple, marginBottom:6}}>BATTLEFIELD</div>
           <h2 style={{fontSize:20, fontWeight:900, color:C.text, margin:0}}>⚔️ 市場争奪戦</h2>
-          <p style={{fontSize:10, color:C.muted, marginTop:4}}>各社の市場占有率（自社シェアのみ表示）</p>
+          <p style={{fontSize:10, color:C.muted, marginTop:4}}>陣地の境界に立つキャラが、押し合いの最前線を示す</p>
         </div>
 
-        {/* 3陣営のバンド：キャラとマスが同じ行で完全に対応 */}
-        <Band type="npc1" mood={npc1Mood} name={npc1?.name||"競合1"} prevStores={prevNpc1Stores} finalStores={npc1Stores}/>
-        <Band type="player" mood={playerMood} name="あなた" prevStores={prevPlayerStores} finalStores={finalPlayerStores}/>
-        <Band type="npc2" mood={npc2Mood} name={npc2?.name||"競合2"} prevStores={prevNpc2Stores} finalStores={npc2Stores}/>
+        {/* 陣取りバー本体 */}
+        <div style={{position:"relative", width:"100%", height:barHeight, marginTop:60, marginBottom:50}}>
+          {/* バー：NPC1 → あなた → NPC2 → 未開拓 の順に並ぶ */}
+          <div style={{position:"absolute", left:0, top:0, width:"100%", height:barHeight, borderRadius:10, overflow:"hidden", display:"flex", border:`1px solid ${C.border}`}}>
+            <div style={{width:`${w.npc1}%`, background:BAND_COLORS.npc1, transition:"width 0.8s cubic-bezier(0.22,1,0.36,1)", height:"100%"}}/>
+            <div style={{width:`${w.player}%`, background:BAND_COLORS.player, transition:"width 0.8s cubic-bezier(0.22,1,0.36,1)", height:"100%"}}/>
+            <div style={{width:`${w.npc2}%`, background:BAND_COLORS.npc2, transition:"width 0.8s cubic-bezier(0.22,1,0.36,1)", height:"100%"}}/>
+            <div style={{width:`${w.none}%`, background:BAND_COLORS.none, transition:"width 0.8s cubic-bezier(0.22,1,0.36,1)", height:"100%"}}/>
+          </div>
+
+          {/* NPC1キャラ：NPC1陣地の右端（あなたとの境界）に立つ */}
+          <div style={{
+            position:"absolute", top:-58, left:`${npc1End}%`, transform:"translateX(-50%)",
+            transition:"left 0.8s cubic-bezier(0.22,1,0.36,1)", textAlign:"center", zIndex:3,
+          }}>
+            <svg width="50" height="58" viewBox="-40 -68 80 88"><CharacterSprite type="npc1" mood={npc1Mood} scale={0.68}/></svg>
+            <div style={{fontSize:9, color:BAND_COLORS.npc1, fontWeight:700, whiteSpace:"nowrap"}}>{npc1?.name||"競合1"}</div>
+          </div>
+
+          {/* あなたキャラ：あなた陣地の右端（NPC2との境界）に立つ */}
+          <div style={{
+            position:"absolute", top:-72, left:`${playerEnd}%`, transform:"translateX(-50%)",
+            transition:"left 0.8s cubic-bezier(0.22,1,0.36,1)", textAlign:"center", zIndex:4,
+          }}>
+            <svg width="62" height="72" viewBox="-45 -75 90 95"><CharacterSprite type="player" mood={playerMood} scale={0.88}/></svg>
+            <div style={{fontSize:10, color:BAND_COLORS.player, fontWeight:700, whiteSpace:"nowrap"}}>あなた</div>
+          </div>
+
+          {/* NPC2キャラ：NPC2陣地の右端（未開拓との境界）に立つ */}
+          <div style={{
+            position:"absolute", top:-58, left:`${npc2End}%`, transform:"translateX(-50%)",
+            transition:"left 0.8s cubic-bezier(0.22,1,0.36,1)", textAlign:"center", zIndex:3,
+          }}>
+            <svg width="46" height="54" viewBox="-30 -55 60 75"><CharacterSprite type="npc2" mood={npc2Mood} scale={0.62}/></svg>
+            <div style={{fontSize:9, color:BAND_COLORS.npc2, fontWeight:700, whiteSpace:"nowrap"}}>{npc2?.name||"競合2"}</div>
+          </div>
+
+          {/* 各陣地の店舗数ラベル（バーの下） */}
+          {showFinal && (
+            <div style={{position:"absolute", top:barHeight+8, left:0, width:"100%", display:"flex", fontSize:10}}>
+              <div style={{width:`${w.npc1}%`, textAlign:"center", color:BAND_COLORS.npc1, fontWeight:700}}>
+                {w.npc1>5 && `${npc1Stores}店`}
+              </div>
+              <div style={{width:`${w.player}%`, textAlign:"center", color:BAND_COLORS.player, fontWeight:700}}>
+                {w.player>5 && `${finalPlayerStores}店`}
+              </div>
+              <div style={{width:`${w.npc2}%`, textAlign:"center", color:BAND_COLORS.npc2, fontWeight:700}}>
+                {w.npc2>5 && `${npc2Stores}店`}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* 各陣営の店舗数サマリー（バーが狭すぎてラベルが入らない場合の保険も兼ねる） */}
+        {showFinal && (
+          <div className="sb-popin" style={{display:"flex", justifyContent:"space-around", marginTop:20, marginBottom:10}}>
+            {[
+              {name:npc1?.name||"競合1", prev:prevNpc1Stores, fin:npc1Stores, color:BAND_COLORS.npc1},
+              {name:"あなた", prev:prevPlayerStores, fin:finalPlayerStores, color:BAND_COLORS.player},
+              {name:npc2?.name||"競合2", prev:prevNpc2Stores, fin:npc2Stores, color:BAND_COLORS.npc2},
+            ].map(r => {
+              const diff = r.fin - r.prev;
+              return (
+                <div key={r.name} style={{textAlign:"center"}}>
+                  <div style={{fontSize:10, color:r.color, fontWeight:700, marginBottom:4}}>{r.name}</div>
+                  <div style={{fontSize:18, fontWeight:900, color:C.text, fontFamily:"'Courier New',monospace"}}>{r.fin}店</div>
+                  <div style={{fontSize:11, fontWeight:700, color: diff>=0?C.green:C.red}}>{diff>=0?"+":""}{diff}</div>
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {/* 奪取イベントの矢印＋テキスト */}
         {currentEvent && (
           <div className="sb-popin" style={{
-            marginTop:10, background:"#0D1117", border:`2px solid ${currentEvent.to==="player"?C.green:C.red}`,
+            marginTop:14, background:"#0D1117", border:`2px solid ${currentEvent.to==="player"?C.green:C.red}`,
             borderRadius:10, padding:"12px 16px", textAlign:"center",
           }}>
             <div style={{fontSize:20}}>{currentEvent.to==="player" ? "⚔️" : "📤"}</div>
