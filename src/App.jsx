@@ -87,8 +87,8 @@ const BUDGET_ITEMS = [
     param:"solutionQuality", basePer100:0.8, decay:0.6, capitalize:true,
     desc:"solutionQuality上昇（逓減あり）。未投資で毎Q-0.6。資産計上。" },
   { id:"marketing",name:"マーケ",         icon:"📢", color:"#E3B341",
-    param:"brandAwareness",  basePer100:1.0, decay:1.0, capitalize:false,
-    desc:"brandAwareness上昇（逓減あり）。未投資で毎Q-1.0。" },
+    param:"brandAwareness",  basePer100:1.0, decay:1.0, capitalize:false, immediate:true,
+    desc:"brandAwareness上昇（逓減あり）。即時反映。未投資で毎Q-1.0。" },
   { id:"cs",       name:"CS・サポート",   icon:"🎧", color:"#FFA657",
     param:"supportQuality",  basePer100:0.9, decay:0.8, capitalize:false,
     desc:"supportQuality上昇（逓減あり）。未投資で毎Q-0.8。" },
@@ -362,6 +362,7 @@ function commitPendingInvestment(ops, investEfficiency = 1.0) {
   const pending = ops.pendingInvestment || {};
   let newOps = { ...ops };
   BUDGET_ITEMS.forEach(item => {
+    if (item.immediate) return; // ★ 即時反映項目は既にqueuePendingInvestmentで処理済みなのでスキップ
     const invested = pending[item.id] || 0;
     if (invested > 0) {
       const gain = calcParamGain(newOps[item.param], item.basePer100, invested, investEfficiency);
@@ -375,8 +376,26 @@ function commitPendingInvestment(ops, investEfficiency = 1.0) {
 }
 
 // 今Q配分した額をpendingInvestmentとして積む（パラメータには反映しない）
-function queuePendingInvestment(ops, allocation) {
-  return { ...ops, pendingInvestment: { ...allocation } };
+// ★ immediate:trueの項目（マーケティング）は即座にパラメータへ反映し、pendingには積まない
+function queuePendingInvestment(ops, allocation, investEfficiency = 1.0) {
+  let newOps = { ...ops };
+  const delayedAlloc = {};
+  BUDGET_ITEMS.forEach(item => {
+    const invested = allocation[item.id] || 0;
+    if (item.immediate) {
+      // 即時反映：今Qの結果にそのまま使う
+      if (invested > 0) {
+        const gain = calcParamGain(newOps[item.param], item.basePer100, invested, investEfficiency);
+        newOps[item.param] = Math.min(PARAM_MAX, newOps[item.param] + gain);
+      } else {
+        newOps[item.param] = Math.max(0, newOps[item.param] - item.decay);
+      }
+    } else {
+      delayedAlloc[item.id] = invested;
+    }
+  });
+  newOps.pendingInvestment = delayedAlloc;
+  return newOps;
 }
 
 // 旧関数：即時反映版（NPC・互換性のために残す）
@@ -454,6 +473,7 @@ function resolveMarket(allPlayers, market, quarter, extraUnclaimed = 0) {
 
     // 競合からの奪取（スコア差 + 3つの対抗関係ボーナス）：±10%のブレ
     let stolenFromRivals = 0;
+    const stolenBreakdown = {}; // ★ 相手ID別の奪取量（戦況シーン表示用）
     allPlayers.forEach((rival, j) => {
       if (i === j || rival.ops.stores === 0) return;
       const diff = myScore - scores[j];
@@ -476,14 +496,18 @@ function resolveMarket(allPlayers, market, quarter, extraUnclaimed = 0) {
         }
 
         rate = Math.max(0, Math.min(0.40, rate));
-        stolenFromRivals += Math.floor(rival.ops.stores * rate * rand(0.20));
+        const amount = Math.floor(rival.ops.stores * rate * rand(0.20));
+        stolenFromRivals += amount;
+        stolenBreakdown[rival.id] = amount;
       }
     });
 
     // 競合に奪われる（スコア差 + 対抗関係ペナルティ - CSによる防御）：±10%のブレ
     let lostToRivals = 0;
+    const lostBreakdown = {}; // ★ 相手ID別の流出量（戦況シーン表示用）
     allPlayers.forEach((rival, j) => {
-      if (i === j || player.ops.stores === 0) return;
+      // ★ 相手の店舗が0の場合、その相手への流出は計上しない（奪取側と対称な仕様に統一）
+      if (i === j || player.ops.stores === 0 || rival.ops.stores === 0) return;
       const diff = scores[j] - myScore;
       if (diff > 0) {
         let rate = Math.min(0.20, (diff / Math.max(myScore, 1)) * 0.25 * phase.stealMultiplier);
@@ -507,7 +531,9 @@ function resolveMarket(allPlayers, market, quarter, extraUnclaimed = 0) {
         rate = Math.max(0, rate - csDefense);
 
         rate = Math.min(0.30, rate);
-        lostToRivals += Math.floor(player.ops.stores * rate * rand(0.20));
+        const amount = Math.floor(player.ops.stores * rate * rand(0.20));
+        lostToRivals += amount;
+        lostBreakdown[rival.id] = amount;
       }
     });
 
@@ -520,7 +546,7 @@ function resolveMarket(allPlayers, market, quarter, extraUnclaimed = 0) {
     const final  = Math.max(0, player.ops.stores + gained - lost);
 
     return { id: player.id, newFromUnclaimed, stolenFromRivals, naturalChurn, lostToRivals,
-             gained, lost, finalStores: final, churnRate };
+             gained, lost, finalStores: final, churnRate, stolenBreakdown, lostBreakdown };
   });
 }
 
@@ -536,7 +562,7 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
   // ①前Qに積んだpendingInvestmentを今Qのパラメータへcommit
   let pOps = commitPendingInvestment(playerOps, investEfficiency);
   // ②今Q配分した額は来Qまでパラメータに反映されない。pendingとして積むだけ
-  pOps = queuePendingInvestment(pOps, playerAlloc);
+  pOps = queuePendingInvestment(pOps, playerAlloc, investEfficiency);
 
   // --- Player: 特別アクション（即時効果）---
   let pBs = { ...playerBs };
@@ -561,7 +587,7 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
     }
     // ①前Qのpendingをcommit ②今Qの配分をpendingとして積む
     let nOps = commitPendingInvestment(n.ops, nEff);
-    nOps = queuePendingInvestment(nOps, alloc);
+    nOps = queuePendingInvestment(nOps, alloc, nEff);
     const nSpecial = Math.random() < 0.40 ? (n.strategy==="sales_heavy"?"chain_deal":"line_collab") : null;
     let nBs = {...n.bs};
     let nSgaAdd = 0; // ★ 特別アクションの費用分。PL計算に反映するため保持
@@ -971,123 +997,206 @@ function CharacterSprite({ type, mood = "normal", scale = 1 }) {
 }
 
 // ============================================================
-// BATTLE BOARD SCENE：陣取り合戦ボード（動的アニメーション）
+// BATTLE BOARD SCENE：陣取り合戦・専用フルスクリーンシーン
+// マスとキャラの位置を直接対応させ、誰からどれだけ奪ったかを明示する
 // ============================================================
-function BattleBoardScene({ prevShares, finalShares, onComplete }) {
-  // prevShares / finalShares: { player: 0-1, npc1: 0-1, npc2: 0-1 } (合計1.0、未開拓含む)
+function BattleBoardScene({ npcs, prevPlayerStores, finalPlayerStores, competResult, market, quarter, onContinue }) {
+  const cr = competResult || {};
   const COLS = 8, ROWS = 6, TOTAL = COLS * ROWS;
   const COLORS = { player:"#00C8D4", npc1:"#E24B4A", npc2:"#3FB950", none:"#30363D" };
 
-  // シェア比率からマス割り当てを生成（左上から順に塗っていく簡易ロジック）
-  function buildGrid(shares) {
+  const totalAvail = Math.max(1, Math.floor(market.totalStores * marketPenetration(quarter)));
+  const npc1 = npcs[0], npc2 = npcs[1];
+  const npc1Stores = Math.floor(npc1?.ops.stores) || 0;
+  const npc2Stores = Math.floor(npc2?.ops.stores) || 0;
+
+  // 前期店舗数（推定）：今期の獲得・流出を逆算
+  const prevNpc1Stores = Math.max(0, npc1Stores - (cr.stolenBreakdown?.[npc1?.id]||0) + (cr.lostBreakdown?.[npc1?.id]||0));
+  const prevNpc2Stores = Math.max(0, npc2Stores - (cr.stolenBreakdown?.[npc2?.id]||0) + (cr.lostBreakdown?.[npc2?.id]||0));
+
+  function buildGrid(playerS, npc1S, npc2S) {
+    // ★ 各カウントをTOTAL(マス総数)でキャップし、過剰なループ反復を防ぐ
     const counts = {
-      player: Math.round((shares.player||0) * TOTAL),
-      npc1: Math.round((shares.npc1||0) * TOTAL),
-      npc2: Math.round((shares.npc2||0) * TOTAL),
+      player: Math.min(TOTAL, Math.max(0, Math.round((playerS/totalAvail) * TOTAL))),
+      npc1: Math.min(TOTAL, Math.max(0, Math.round((npc1S/totalAvail) * TOTAL))),
+      npc2: Math.min(TOTAL, Math.max(0, Math.round((npc2S/totalAvail) * TOTAL))),
     };
     const used = counts.player + counts.npc1 + counts.npc2;
     counts.none = Math.max(0, TOTAL - used);
-    // 陣営ごとにまとまったブロックにするため、コーナーから埋める
     const grid = new Array(TOTAL).fill("none");
     let idx = 0;
-    // player: 左下から
     for (let i=0; i<counts.player && idx<TOTAL; i++) grid[idx++] = "player";
-    // npc1: 右上から（逆順で埋める）
     let ri = TOTAL - 1;
-    for (let i=0; i<counts.npc1; i++) { while (grid[ri] !== "none" && ri>=0) ri--; if (ri>=0) grid[ri--] = "npc1"; }
-    // npc2: 右下寄り
+    for (let i=0; i<counts.npc1 && ri>=0; i++) { while (ri>=0 && grid[ri]!=="none") ri--; if (ri>=0) grid[ri--]="npc1"; }
     let ri2 = TOTAL - 1;
-    for (let i=0; i<counts.npc2; i++) { while (grid[ri2] !== "none" && ri2>=0) ri2--; if (ri2>=0) grid[ri2--] = "npc2"; }
+    for (let i=0; i<counts.npc2 && ri2>=0; i++) { while (ri2>=0 && grid[ri2]!=="none") ri2--; if (ri2>=0) grid[ri2--]="npc2"; }
     return grid;
   }
 
-  const prevGrid = buildGrid(prevShares);
-  const finalGrid = buildGrid(finalShares);
+  const prevGrid = buildGrid(prevPlayerStores, prevNpc1Stores, prevNpc2Stores);
+  const finalGrid = buildGrid(finalPlayerStores, npc1Stores, npc2Stores);
 
-  const [step, setStep] = useState(0); // 0=prev表示, 1=フラッシュ中, 2=final表示+キャラ反応
+  // ステップ進行：0=前期表示 → 1=各奪取イベントを順番に1件ずつ見せる → 2=最終結果
+  const events = [
+    cr.stolenBreakdown?.[npc1?.id] > 0 && { from:"npc1", to:"player", amount:cr.stolenBreakdown[npc1.id], label:`${npc1?.name}から奪取` },
+    cr.stolenBreakdown?.[npc2?.id] > 0 && { from:"npc2", to:"player", amount:cr.stolenBreakdown[npc2.id], label:`${npc2?.name}から奪取` },
+    cr.lostBreakdown?.[npc1?.id] > 0 && { from:"player", to:"npc1", amount:cr.lostBreakdown[npc1.id], label:`${npc1?.name}へ流出` },
+    cr.lostBreakdown?.[npc2?.id] > 0 && { from:"player", to:"npc2", amount:cr.lostBreakdown[npc2.id], label:`${npc2?.name}へ流出` },
+    (cr.newFromUnclaimed||0) > 0 && { from:"none", to:"player", amount:cr.newFromUnclaimed, label:"新規開拓" },
+  ].filter(Boolean);
+
+  const [eventIdx, setEventIdx] = useState(-1); // -1=未開始, 0..events.length-1=表示中, events.length=完了
+  const [showFinal, setShowFinal] = useState(false);
+
   useEffect(() => {
-    setStep(0);
-    const t1 = setTimeout(() => setStep(1), 500);
-    const t2 = setTimeout(() => setStep(2), 1400);
-    const t3 = setTimeout(() => { if (onComplete) onComplete(); }, 2400);
-    return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); };
-  }, [JSON.stringify(finalShares)]);
+    setEventIdx(-1);
+    setShowFinal(false);
+    if (events.length === 0) {
+      const t = setTimeout(() => setShowFinal(true), 600);
+      return () => clearTimeout(t);
+    }
+    let i = 0;
+    const timer = setInterval(() => {
+      setEventIdx(i);
+      i++;
+      if (i > events.length) {
+        clearInterval(timer);
+        setShowFinal(true);
+      }
+    }, 1100);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quarter]);
 
-  const displayGrid = step === 0 ? prevGrid : finalGrid;
-  const changedCells = prevGrid.map((c, i) => c !== finalGrid[i]);
+  const displayGrid = showFinal ? finalGrid : prevGrid;
 
-  // 結果に応じたキャラのmood判定
-  const moodFor = (key) => {
-    const prev = prevShares[key] || 0, fin = finalShares[key] || 0;
-    if (fin > prev + 0.02) return "happy";
-    if (fin < prev - 0.02) return "worried";
-    return "normal";
-  };
-  const playerMood = step >= 2 ? moodFor("player") : "normal";
-  const npc1Mood = step >= 2 ? moodFor("npc1") : "normal";
-  const npc2Mood = step >= 2 ? moodFor("npc2") : "normal";
+  const moodFor = (prev, fin) => fin > prev ? "happy" : fin < prev ? "worried" : "normal";
+  const playerMood = showFinal ? moodFor(prevPlayerStores, finalPlayerStores) : "normal";
+  const npc1Mood = showFinal ? moodFor(prevNpc1Stores, npc1Stores) : "normal";
+  const npc2Mood = showFinal ? moodFor(prevNpc2Stores, npc2Stores) : "normal";
 
-  const cellSize = 36, gap = 1;
+  const cellSize = 34, gap = 2;
   const boardW = COLS * (cellSize+gap), boardH = ROWS * (cellSize+gap);
+  const currentEvent = eventIdx >= 0 && eventIdx < events.length ? events[eventIdx] : null;
 
   return (
-    <Panel style={{marginBottom:14, overflow:"hidden"}}>
-      <Label style={{display:"block", marginBottom:12, textAlign:"center"}}>⚔️ 市場争奪戦</Label>
-      <div style={{display:"flex", justifyContent:"center", alignItems:"center", gap:16, flexWrap:"wrap"}}>
-        {/* NPC1 (上) */}
-        <div style={{display:"flex", flexDirection:"column", alignItems:"center", gap:4}}>
-          <svg width="70" height="80" viewBox="-40 -70 80 90">
-            <CharacterSprite type="npc1" mood={npc1Mood} scale={0.85}/>
-          </svg>
-          <span style={{fontSize:9, color:"#E24B4A", fontWeight:700}}>グローバルウェア</span>
+    <div style={bgBase}>
+      <div style={{maxWidth:560, margin:"0 auto", padding:"32px 20px", minHeight:"100vh", display:"flex", flexDirection:"column"}}>
+        <div style={{textAlign:"center", marginBottom:18}}>
+          <div style={{fontSize:11, letterSpacing:4, color:C.purple, marginBottom:6}}>BATTLEFIELD</div>
+          <h2 style={{fontSize:20, fontWeight:900, color:C.text, margin:0}}>⚔️ 市場争奪戦</h2>
         </div>
 
-        {/* ボード */}
-        <svg width={boardW} height={boardH} style={{flexShrink:0}}>
-          {displayGrid.map((color, i) => {
-            const col = i % COLS, row = Math.floor(i / COLS);
-            const changed = changedCells[i];
-            const isFlashing = changed && step === 1;
-            return (
-              <rect
-                key={i}
-                x={col*(cellSize+gap)} y={row*(cellSize+gap)}
-                width={cellSize} height={cellSize} rx="2"
-                fill={isFlashing ? "#FFFFFF" : COLORS[color]}
-                opacity={isFlashing ? 0.9 : 1}
-                style={{transition:"fill 0.5s ease, opacity 0.3s ease"}}
-              />
-            );
-          })}
-        </svg>
-
-        {/* NPC2 (下) */}
-        <div style={{display:"flex", flexDirection:"column", alignItems:"center", gap:4}}>
-          <svg width="60" height="70" viewBox="-30 -55 60 75">
-            <CharacterSprite type="npc2" mood={npc2Mood} scale={0.8}/>
+        <div style={{position:"relative", margin:"0 auto", width:boardW+90, height:boardH+110}}>
+          {/* ボード */}
+          <svg width={boardW} height={boardH} style={{position:"absolute", left:0, top:30}}>
+            {displayGrid.map((color, i) => {
+              const col = i % COLS, row = Math.floor(i / COLS);
+              return (
+                <rect key={i}
+                  x={col*(cellSize+gap)} y={row*(cellSize+gap)}
+                  width={cellSize} height={cellSize} rx="3"
+                  fill={COLORS[color]}
+                  style={{transition:"fill 0.6s ease"}}
+                />
+              );
+            })}
           </svg>
-          <span style={{fontSize:9, color:"#3FB950", fontWeight:700}}>ネクストビット</span>
-        </div>
-      </div>
 
-      {/* プレイヤー（下部中央） */}
-      <div style={{display:"flex", justifyContent:"center", marginTop:10}}>
-        <div style={{display:"flex", flexDirection:"column", alignItems:"center", gap:4}}>
-          <svg width="80" height="90" viewBox="-45 -75 90 95">
-            <CharacterSprite type="player" mood={playerMood} scale={1}/>
-          </svg>
-          <span style={{fontSize:10, color:"#00C8D4", fontWeight:700}}>あなた</span>
-        </div>
-      </div>
+          {/* キャラクター配置：プレイヤー下、NPC1右上、NPC2右下 */}
+          <div style={{position:"absolute", left:boardW/2-40, top:boardH+40, textAlign:"center"}}>
+            <svg width="80" height="90" viewBox="-45 -75 90 95"><CharacterSprite type="player" mood={playerMood} scale={1}/></svg>
+            <div style={{fontSize:10, color:COLORS.player, fontWeight:700}}>あなた</div>
+          </div>
+          <div style={{position:"absolute", left:boardW+5, top:0, textAlign:"center"}}>
+            <svg width="64" height="74" viewBox="-38 -66 76 86"><CharacterSprite type="npc1" mood={npc1Mood} scale={0.78}/></svg>
+            <div style={{fontSize:9, color:COLORS.npc1, fontWeight:700}}>{npc1?.name}</div>
+          </div>
+          <div style={{position:"absolute", left:boardW+5, top:boardH-70, textAlign:"center"}}>
+            <svg width="56" height="66" viewBox="-30 -55 60 75"><CharacterSprite type="npc2" mood={npc2Mood} scale={0.72}/></svg>
+            <div style={{fontSize:9, color:COLORS.npc2, fontWeight:700}}>{npc2?.name}</div>
+          </div>
 
-      {/* 凡例 */}
-      <div style={{display:"flex", justifyContent:"center", gap:14, marginTop:10, fontSize:10, color:"#8B949E"}}>
-        <span><span style={{display:"inline-block",width:8,height:8,background:COLORS.player,borderRadius:2,marginRight:4}}/>あなた</span>
-        <span><span style={{display:"inline-block",width:8,height:8,background:COLORS.npc1,borderRadius:2,marginRight:4}}/>グローバルウェア</span>
-        <span><span style={{display:"inline-block",width:8,height:8,background:COLORS.npc2,borderRadius:2,marginRight:4}}/>ネクストビット</span>
-        <span><span style={{display:"inline-block",width:8,height:8,background:COLORS.none,borderRadius:2,marginRight:4}}/>未開拓</span>
+          {/* 奪取イベントの矢印＋テキスト（中央に表示） */}
+          {currentEvent && (
+            <div className="sb-popin" style={{
+              position:"absolute", left:"50%", top:30+boardH/2-20, transform:"translateX(-50%)",
+              background:"#0D1117EE", border:`2px solid ${currentEvent.to==="player"?C.green:C.red}`,
+              borderRadius:10, padding:"10px 16px", textAlign:"center", whiteSpace:"nowrap", zIndex:5,
+            }}>
+              <div style={{fontSize:20}}>{currentEvent.to==="player" ? "⚔️" : "📤"}</div>
+              <div style={{fontSize:12, fontWeight:700, color: currentEvent.to==="player"?C.green:C.red}}>
+                {currentEvent.label}
+              </div>
+              <div style={{fontSize:16, fontWeight:900, color:C.text, fontFamily:"'Courier New',monospace"}}>
+                {currentEvent.to==="player" ? "+" : "-"}{currentEvent.amount}店
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* 進行状況ドット */}
+        {!showFinal && (
+          <div style={{display:"flex", justifyContent:"center", gap:6, marginTop:16}}>
+            {events.length === 0
+              ? <div style={{fontSize:11, color:C.muted}}>大きな変動なし...</div>
+              : events.map((_, i) => (
+                  <div key={i} style={{
+                    width:7, height:7, borderRadius:"50%",
+                    background: i <= eventIdx ? C.cyan : C.border,
+                    transition:"background 0.3s",
+                  }}/>
+                ))
+            }
+          </div>
+        )}
+
+        {/* 最終結果サマリー */}
+        {showFinal && (
+          <div className="sb-popin" style={{marginTop:20}}>
+            <Panel>
+              <div style={{display:"flex", justifyContent:"space-around", textAlign:"center"}}>
+                {[
+                  {label:"あなた", prev:prevPlayerStores, fin:finalPlayerStores, color:COLORS.player},
+                  {label:npc1?.name, prev:prevNpc1Stores, fin:npc1Stores, color:COLORS.npc1},
+                  {label:npc2?.name, prev:prevNpc2Stores, fin:npc2Stores, color:COLORS.npc2},
+                ].map(r => {
+                  const diff = r.fin - r.prev;
+                  return (
+                    <div key={r.label}>
+                      <div style={{fontSize:10, color:r.color, fontWeight:700, marginBottom:4}}>{r.label}</div>
+                      <div style={{fontSize:18, fontWeight:900, color:C.text, fontFamily:"'Courier New',monospace"}}>{r.fin}店</div>
+                      <div style={{fontSize:11, fontWeight:700, color: diff>=0?C.green:C.red}}>
+                        {diff>=0?"+":""}{diff}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </Panel>
+            <button onClick={onContinue} style={{
+              marginTop:16, width:"100%", padding:14, borderRadius:10, border:"none",
+              background:`linear-gradient(135deg,#006080,${C.cyan})`, color:"#fff",
+              fontSize:14, fontWeight:700, cursor:"pointer", letterSpacing:2,
+            }}>
+              決算を確認する →
+            </button>
+          </div>
+        )}
+
+        {/* スキップ */}
+        {!showFinal && (
+          <div style={{textAlign:"center", marginTop:16}}>
+            <button onClick={() => setShowFinal(true)} style={{
+              background:"none", border:"none", color:C.muted, fontSize:11,
+              cursor:"pointer", opacity:0.6, textDecoration:"underline",
+            }}>
+              スキップ
+            </button>
+          </div>
+        )}
       </div>
-    </Panel>
+    </div>
   );
 }
 
@@ -1299,7 +1408,7 @@ function BudgetAllocator({ availableBudget, allocation, onChange, bs, playerType
       </div>
       <div style={{marginBottom:10,padding:"8px 12px",background:`${C.purple}10`,border:`1px solid ${C.purple}33`,borderRadius:8,display:"flex",gap:8,alignItems:"center"}}>
         <span style={{fontSize:14}}>⏳</span>
-        <span style={{fontSize:10,color:C.muted}}>今Qの投資は<b style={{color:C.purple}}>来Qから</b>パラメータに反映されます（即時効果ではありません）</span>
+        <span style={{fontSize:10,color:C.muted}}>営業・開発・CSは<b style={{color:C.purple}}>来Qから</b>反映。<b style={{color:C.yellow}}>マーケは今Qから即時反映</b>されます</span>
       </div>
       <div style={{display:"grid",gap:8}}>
         {BUDGET_ITEMS.map(item => {
@@ -1333,7 +1442,7 @@ function BudgetAllocator({ availableBudget, allocation, onChange, bs, playerType
                     <span style={{fontSize:10,color:C.muted}}>{item.desc}</span>
                     <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",marginLeft:8,flexShrink:0}}>
                       <span style={{fontSize:11,fontWeight:700,color:gain>0?C.green:C.red}}>
-                        来Q {paramLabels[item.param]||item.param} {gain>0?"+":""}{Number(gain).toFixed(1)}
+                        {item.immediate ? "今Q" : "来Q"} {paramLabels[item.param]||item.param} {gain>0?"+":""}{Number(gain).toFixed(1)}
                       </span>
                       {item.capitalize && <span style={{fontSize:9,color:C.purple}}>資産計上（PL影響なし）</span>}
                     </div>
@@ -2693,7 +2802,7 @@ export default function App() {
 
       // ★ Stage1: 時間差反映（前Qのpendingをcommit→今Qの配分をpendingへ積む）
       let pOps = commitPendingInvestment(pState.ops, eff);
-      pOps = queuePendingInvestment(pOps, alloc);
+      pOps = queuePendingInvestment(pOps, alloc, eff);
       let pBs = {...pState.bs};
       let sgaAdd = 0, capitalizeAmt = 0;
 
@@ -2984,8 +3093,17 @@ export default function App() {
     let newBs = {...bs}, newOps = {...ops};
 
     if (choice.effect === "none") { setBs(newBs); setOps(newOps); setPendingChoice(null); goToResultOrForecast(lastPL); return; }
-    if (choice.bsCost)      newBs = {...newBs, cash: newBs.cash - choice.bsCost};
-    if (choice.cashGain)    newBs = {...newBs, cash: newBs.cash + choice.cashGain};
+    // ★ bsCostはPLを通らない支出なので、cashとretainedEarningsを同額変動させてBS整合を維持
+    if (choice.bsCost)      newBs = {...newBs, cash: newBs.cash - choice.bsCost, retainedEarnings: newBs.retainedEarnings - choice.bsCost};
+    // ★ cashGainは「出資（capitalGainとセット）」なら資本金の増加で資産側が既にカバーされるためretainedEarningsには積まない。
+    //   単独の現金収入（出資を伴わない）ならretainedEarningsにも積んでBS整合を保つ。
+    if (choice.cashGain) {
+      if (choice.capitalGain) {
+        newBs = {...newBs, cash: newBs.cash + choice.cashGain};
+      } else {
+        newBs = {...newBs, cash: newBs.cash + choice.cashGain, retainedEarnings: newBs.retainedEarnings + choice.cashGain};
+      }
+    }
     if (choice.capitalGain) newBs = {...newBs, capital: newBs.capital + choice.capitalGain};
     if (choice.storeBonus)  newOps = {...newOps, stores: newOps.stores + choice.storeBonus};
     if (choice.permanentOpex) setPermanentOpexExtra(p => p + choice.permanentOpex);
@@ -3012,10 +3130,10 @@ export default function App() {
     setQuarter(q => q + 1); setScreen("play"); setTab("budget");
   }
 
-  // result画面へ遷移（決算組成アニメーションはresult画面冒頭で実施）
+  // battlefield画面（陣取り合戦シーン）→ result画面の順で遷移
   function goToResultOrForecast(pl) {
     setBsAnimReady(false); // BSアニメーションを最初から見せるためリセット
-    setScreen("result");
+    setScreen("battlefield");
   }
 
   function advanceFromYearReview() {
@@ -3383,6 +3501,24 @@ export default function App() {
     );
   }
 
+  // BATTLEFIELD SCENE：陣取り合戦の専用シーン
+  if (screen === "battlefield" && lastPL && market) {
+    const cr = lastPL.competResult || {};
+    const prevPlayerStores = Math.max(0, Math.floor((ops.stores||0) - (cr.newFromUnclaimed||0) - (cr.stolenFromRivals||0) + (cr.naturalChurn||0) + (cr.lostToRivals||0)));
+    const finalPlayerStores = Math.floor(ops.stores) || 0;
+    return (
+      <BattleBoardScene
+        npcs={npcs}
+        prevPlayerStores={prevPlayerStores}
+        finalPlayerStores={finalPlayerStores}
+        competResult={cr}
+        market={market}
+        quarter={quarter}
+        onContinue={() => setScreen("result")}
+      />
+    );
+  }
+
   // QUARTER RESULT
   if (screen==="result" && lastPL) {
     const cr = lastPL.competResult;
@@ -3452,32 +3588,6 @@ export default function App() {
               ))}
             </div>
           )}
-
-          {/* ② 過程：陣取り合戦ボード（動的アニメーション） */}
-          {(() => {
-            const prevPlayerStores = Math.max(0, Math.floor((ops.stores||0) - (cr?.newFromUnclaimed||0) - (cr?.stolenFromRivals||0) + (cr?.naturalChurn||0) + (cr?.lostToRivals||0)));
-            const finalPlayerStores = Math.floor(ops.stores)||0;
-            const npc1Stores = Math.floor(npcs[0]?.ops.stores)||0;
-            const npc2Stores = Math.floor(npcs[1]?.ops.stores)||0;
-            const totalAvail = Math.max(1, Math.floor(market.totalStores * marketPenetration(quarter)));
-            const finalShares = {
-              player: finalPlayerStores/totalAvail,
-              npc1: npc1Stores/totalAvail,
-              npc2: npc2Stores/totalAvail,
-            };
-            // 前Qのシェアは差分から逆算（厳密でなくても陣取りの変化を見せる目的なので近似でOK）
-            const prevShares = {
-              player: prevPlayerStores/totalAvail,
-              npc1: Math.max(0,(npc1Stores - (cr?.stolenFromRivals||0)*0))/totalAvail, // NPCの前期値は簡略化
-              npc2: Math.max(0,(npc2Stores))/totalAvail,
-            };
-            return (
-              <BattleBoardScene
-                prevShares={prevShares}
-                finalShares={finalShares}
-              />
-            );
-          })()}
 
           {/* ② 過程：戦況バトルカード（奪取/解約の内訳） */}
           <BattleResultCard
