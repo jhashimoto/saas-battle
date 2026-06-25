@@ -106,7 +106,7 @@ function calcParamGain(currentVal, basePer100, invested, efficiency) {
 // 特別アクション（予算配分とは別に1Qに1枚選択可能。コストは予算から引く）
 const SPECIAL_ACTIONS = {
   chain_deal:   { id:"chain_deal",  icon:"🏬", name:"大手チェーン契約",  cost:500,
-    desc:"即時+25店。一気にシェアを取りに行く大型営業。", storeBonus:25, cat:"sales" },
+    desc:"即時+25店。一気にシェアを取りに行く大型営業。1回限り。", storeBonus:25, cat:"sales", oneTime:true },
   line_collab:  { id:"line_collab", icon:"🔗", name:"LINE公式連携強化",  cost:400,
     desc:"solutionQuality+30。競合との決定的な差別化に。資産計上。",
     effects:{solutionQuality:30}, capitalize:true, cat:"dev" },
@@ -278,12 +278,17 @@ function competitiveScore(ops, baseArpu) {
        + bc * 25 + priceScore * 0.20 + ops.supportQuality * 0.10;
 }
 
-function calcChurn(ops) {
+function calcChurn(ops, baseArpu) {
   const base = 0.12;
-  return Math.max(0.005, Math.min(0.35,
+  // ★ C案：値上げするほど自然解約が増える（高単価戦略の代償）
+  // 値上げ+100%で+30%の解約率上乗せ。値下げはペナルティなし（現状維持）
+  const priceRatio = (baseArpu && ops.setPrice) ? ops.setPrice / baseArpu : 1.0;
+  const priceEffect = Math.max(0, priceRatio - 1) * 0.30;
+  return Math.max(0.005, Math.min(0.45,
     base
     - (ops.supportQuality - 50) * 0.0015
     - (ops.solutionQuality - 50) * 0.0006
+    + priceEffect
   ));
 }
 
@@ -301,6 +306,18 @@ function calcPriceMultiplier(setPrice, baseArpu) {
 
 function calcVarCost(ops, market) {
   return Math.floor(ops.stores * market.varCostPerStore);
+}
+
+// ★ 営業力強化＝人員増強と解釈。salesPowerが50を超えると段階的に固定費が増える。
+// 0〜50: 追加費用なし（既存人員で対応可能）
+// 50〜100: (salesPower-50)×0.8万/Q（営業人員を増やしている）
+// 100〜150: さらに(salesPower-100)×1.5万/Q追加（マネジメント層も必要になり増加ペースが上がる）
+function calcSalesOpexAddon(salesPower) {
+  const sp = Math.max(0, salesPower || 0);
+  let addon = 0;
+  if (sp > 50) addon += Math.min(sp, 100) - 50 > 0 ? (Math.min(sp, 100) - 50) * 0.8 : 0;
+  if (sp > 100) addon += (Math.min(sp, 150) - 100) * 1.5;
+  return Math.floor(addon);
 }
 
 // 予算配分をopsに反映（逓減カーブ付き投資効果 or 自然劣化）
@@ -468,7 +485,10 @@ function resolveMarket(allPlayers, market, quarter, extraUnclaimed = 0) {
     const myShare = totalScore > 0 ? myScore / totalScore : 1 / allPlayers.length;
 
     // 新規獲得：±15%のブレ（市場の動きは完全に予測できない）
-    const rawNewFromUnclaimed = Math.floor(unclaimed * myShare * 0.15 * phase.growthBonus * rand(0.30));
+    // ★ C案：低価格戦略のメリット強化。標準価格より安いほど新規獲得が加速する
+    const myPriceRatio = (market.arpu && player.ops.setPrice) ? player.ops.setPrice / market.arpu : 1.0;
+    const priceFavorBonus = 1 + Math.max(0, (1 - myPriceRatio)) * 0.8; // 半額で+40%ボーナス
+    const rawNewFromUnclaimed = Math.floor(unclaimed * myShare * 0.15 * phase.growthBonus * priceFavorBonus * rand(0.30));
     const newFromUnclaimed = unclaimed > 0 ? Math.max(1, rawNewFromUnclaimed) : 0;
 
     // 競合からの奪取（スコア差 + 3つの対抗関係ボーナス）：±10%のブレ
@@ -492,7 +512,7 @@ function resolveMarket(allPlayers, market, quarter, extraUnclaimed = 0) {
         if (myPrice < rivalPrice) {
           const priceDiffRatio = (rivalPrice - myPrice) / rivalPrice;
           const qualityResistance = Math.max(0.3, 1 - rival.ops.solutionQuality / 150); // 品質が高いほど0.3に近づき効果減衰
-          rate += priceDiffRatio * (market.priceSensitivity || 0.6) * 0.4 * qualityResistance;
+          rate += priceDiffRatio * (market.priceSensitivity || 0.6) * 0.6 * qualityResistance;
         }
 
         rate = Math.max(0, Math.min(0.40, rate));
@@ -538,7 +558,7 @@ function resolveMarket(allPlayers, market, quarter, extraUnclaimed = 0) {
     });
 
     // 自然解約：±10%のブレ
-    const churnRate = calcChurn(player.ops);
+    const churnRate = calcChurn(player.ops, market.arpu);
     const naturalChurn = Math.floor(player.ops.stores * churnRate * rand(0.20));
 
     const gained = newFromUnclaimed + stolenFromRivals;
@@ -588,15 +608,23 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
     // ①前Qのpendingをcommit ②今Qの配分をpendingとして積む
     let nOps = commitPendingInvestment(n.ops, nEff);
     nOps = queuePendingInvestment(nOps, alloc, nEff);
-    const nSpecial = Math.random() < 0.40 ? (n.strategy==="sales_heavy"?"chain_deal":"line_collab") : null;
+    const nUsedSpecials = n.usedSpecials || [];
+    const candidateSpecial = n.strategy === "sales_heavy" ? "chain_deal" : "line_collab";
+    const candidateAction = SPECIAL_ACTIONS[candidateSpecial];
+    // ★ oneTimeアクションは既に使用済みなら抽選対象から外す（プレイヤーと同じ制約）
+    const alreadyUsed = candidateAction?.oneTime && nUsedSpecials.includes(candidateSpecial);
+    const nSpecial = (!alreadyUsed && Math.random() < 0.40) ? candidateSpecial : null;
     let nBs = {...n.bs};
     let nSgaAdd = 0; // ★ 特別アクションの費用分。PL計算に反映するため保持
     if (nSpecial) {
-      const r = applySpecialAction(nBs, nOps, nSpecial, []);
+      const r = applySpecialAction(nBs, nOps, nSpecial, nUsedSpecials);
       nBs = r.bs; nOps = r.ops; nSgaAdd = r.sgaAdd || 0;
       // r.capitalizeAmtはapplySpecialAction内でnBs.softwareAssetに既に加算済みなのでここでは何もしない
     }
-    return { ...n, ops: nOps, bs: nBs, usedSpecial: nSpecial, specialSgaAdd: nSgaAdd };
+    const newNUsedSpecials = (nSpecial && SPECIAL_ACTIONS[nSpecial]?.oneTime)
+      ? [...nUsedSpecials, nSpecial]
+      : nUsedSpecials;
+    return { ...n, ops: nOps, bs: nBs, usedSpecial: nSpecial, specialSgaAdd: nSgaAdd, usedSpecials: newNUsedSpecials };
   });
 
   // --- 競争解決 ---
@@ -635,33 +663,39 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
   // 資産計上分だけBSのsoftwareAssetに加算
   pBs.softwareAsset += allocCapitalize;
 
+  // ★ 営業力強化＝人員増強と解釈。salesPowerが一定以上だと固定費が段階的に増える
+  const salesOpexAddon = calcSalesOpexAddon(finalPOps.salesPower);
+  const totalBaseOpex = baseOpex + salesOpexAddon;
+
   const revenue  = calcRevenue(finalPOps, market);
   const cogs     = Math.floor(revenue * 0.25);
   const varCost  = calcVarCost(finalPOps, market);
-  const totalSga = allocSga + sgaAdd + baseOpex + varCost;
+  const totalSga = allocSga + sgaAdd + totalBaseOpex + varCost;
   const grossProfit     = revenue - cogs;
   const operatingProfit = grossProfit - totalSga - dep;
   const netIncome       = operatingProfit - interest;
 
   // ★ BS整合：
-  // cash変動   = rev - cogs - varCost - opex - allocSga - sgaAdd - allocCapitalize - interest - principalPaid
-  // retainedΔ = rev - cogs - varCost - opex - allocSga - sgaAdd - dep - interest  (= netIncome)
+  // cash変動   = rev - cogs - varCost - opex(addon込み) - allocSga - sgaAdd - allocCapitalize - interest - principalPaid
+  // retainedΔ = rev - cogs - varCost - opex(addon込み) - allocSga - sgaAdd - dep - interest  (= netIncome)
   // debtΔ      = -principalPaid
   // swAssetΔ  = allocCapitalize - dep
   // totalAssetsΔ = cashΔ + swΔ = netIncome - principalPaid
   // 負債純資産側Δ = retainedΔ + debtΔ = netIncome - principalPaid ✓ 一致
-  pBs.cash += revenue - cogs - varCost - baseOpex - allocSga - sgaAdd - allocCapitalize - interest - principalPaid;
+  pBs.cash += revenue - cogs - varCost - totalBaseOpex - allocSga - sgaAdd - allocCapitalize - interest - principalPaid;
   pBs.retainedEarnings += netIncome; // netIncome = rev-cogs-varCost-opex-allocSga-sgaAdd-dep-interest
 
   const pl = {
     revenue, cogs, grossProfit, varCost,
-    allocSga, allocCapitalize, sgaAdd, opex: baseOpex, totalSga,
+    allocSga, allocCapitalize, sgaAdd, opex: totalBaseOpex, baseOpexCore: baseOpex, salesOpexAddon, totalSga,
     depAmt: dep, interestExpense: interest, principalPaid,
     operatingProfit, netIncome,
     competResult: pResult,
     phase: phase.name,
     playerAlloc, playerSpecial,
     investEfficiency,
+    market: { arpu: market.arpu, varCostPerStore: market.varCostPerStore }, // ★ PL詳細表示用
+    priceMultiplier: finalPOps.priceMultiplier,
   };
 
   // --- NPC PL/BS確定（プレイヤーと同じロジックで計算）---
@@ -695,12 +729,16 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
     const nCogs = Math.floor(nRev * 0.25);
     const nVarC = calcVarCost(nFinalOps, market);
 
+    // ★ 営業力強化＝人員増強と解釈。NPCにも同様に適用（プレイヤーとの公平性のため）
+    const nSalesOpexAddon = calcSalesOpexAddon(nFinalOps.salesPower);
+    const nTotalBaseOpex = nBaseOpex + nSalesOpexAddon;
+
     // ★ プレイヤーと同じBS整合ロジック（nSgaAddを費用として明示的に計上）
     // 注意：applySpecialActionで既にnBs.cashからaction.costが引かれているため、
     // ここでcashを再度引いてしまうと二重減算になる。
     // そのためcash計算からはnSgaAdd分を除外し、retainedEarningsにはnSgaAddを反映させる。
-    const nNetIncome = nRev - nCogs - nVarC - nBaseOpex - nAllocSga - nSgaAdd - nDep - nInt;
-    nBs.cash += nRev - nCogs - nVarC - nBaseOpex - nAllocSga - nAllocCap - nInt;
+    const nNetIncome = nRev - nCogs - nVarC - nTotalBaseOpex - nAllocSga - nSgaAdd - nDep - nInt;
+    nBs.cash += nRev - nCogs - nVarC - nTotalBaseOpex - nAllocSga - nAllocCap - nInt;
     nBs.retainedEarnings += nNetIncome;
 
     return { ...n, ops: nFinalOps, bs: nBs, lastSpecial: n.usedSpecial };
@@ -1757,19 +1795,35 @@ function BSTable({bs}) {
 function PLBuildAnimation({ pl, quarter, onComplete }) {
   const [step, setStep] = useState(0);
 
-  // 表示する行（小計を都度計算）
+  // 投資項目の内訳（資産計上分=devを除く費用化された項目）
+  const allocDetail = BUDGET_ITEMS
+    .filter(item => !item.capitalize && (pl.playerAlloc?.[item.id] || 0) > 0)
+    .map(item => ({ name: item.name, icon: item.icon, amount: pl.playerAlloc[item.id] }));
+
+  const stores = pl.competResult?.finalStores || 0;
+  const arpu = pl.market?.arpu;
+  const priceMultiplier = pl.priceMultiplier;
+
+  // 表示する行（小計を都度計算）。detail: 補足説明（小さい文字で内訳を出す）
   const rows = [
-    { label:"売上高",        value: pl.revenue,        kind:"plus" },
-    { label:"売上原価",      value: -pl.cogs,          kind:"minus" },
-    { label:"売上総利益",    value: null,               kind:"subtotal" },
-    { label:"予算投資費用",  value: -pl.allocSga,      kind:"minus", skip: pl.allocSga === 0 },
+    { label:"売上高", value: pl.revenue, kind:"plus",
+      detail: (stores && arpu) ? `${stores}店 × ¥${arpu}万 × ${(priceMultiplier||1).toFixed(2)}倍` : null },
+    { label:"売上原価", value: -pl.cogs, kind:"minus", detail:"売上高の25%" },
+    { label:"売上総利益", value: null, kind:"subtotal" },
+    ...allocDetail.map(d => ({
+      label: `　${d.icon} ${d.name}投資`, value: -d.amount, kind:"minus", indent:true,
+    })),
     { label:"特別アクション費", value: -(pl.sgaAdd||0), kind:"minus", skip: !pl.sgaAdd },
-    { label:"店舗変動費",    value: -pl.varCost,       kind:"minus" },
-    { label:"固定運営費",    value: -pl.opex,          kind:"minus" },
-    { label:"開発費（償却）", value: -pl.depAmt,        kind:"minus", skip: !pl.depAmt },
-    { label:"営業利益",      value: null,               kind:"subtotal" },
-    { label:"支払利息",      value: -(pl.interestExpense||0), kind:"minus", skip: !pl.interestExpense },
-    { label:"当期純利益",    value: pl.netIncome,      kind:"final" },
+    { label:"顧客あたり運用コスト", value: -pl.varCost, kind:"minus",
+      detail: (stores && pl.market?.varCostPerStore) ? `${stores}店 × ¥${pl.market.varCostPerStore}万/店` : null },
+    { label:"固定運営費", value: -pl.opex, kind:"minus",
+      detail: pl.salesOpexAddon > 0
+        ? `基本¥${pl.baseOpexCore}万 + 営業人員増強¥${pl.salesOpexAddon}万`
+        : "事業者タイプ固有の固定費" },
+    { label:"開発費（償却）", value: -pl.depAmt, kind:"minus", skip: !pl.depAmt, detail:"ソフトウェア資産の10%/Q" },
+    { label:"営業利益", value: null, kind:"subtotal" },
+    { label:"支払利息", value: -(pl.interestExpense||0), kind:"minus", skip: !pl.interestExpense, detail:"借入残高×5%/Q" },
+    { label:"当期純利益", value: pl.netIncome, kind:"final" },
   ].filter(r => !r.skip);
 
   let running = 0;
@@ -1835,29 +1889,36 @@ function PLBuildAnimation({ pl, quarter, onComplete }) {
           const isSubtotal = r.kind === "subtotal" || r.kind === "final";
           return (
             <div key={r.label} style={{
-              display:"flex", justifyContent:"space-between", alignItems:"center",
               padding: isSubtotal ? "8px 0" : "5px 0",
               borderTop: isSubtotal ? `1px solid ${C.border}` : "none",
               borderBottom: isSubtotal ? `1px solid ${C.border}` : `1px dashed ${C.border}55`,
               opacity: isLast ? 0 : 1,
               animation: isLast ? "slideInRight 0.35s ease-out forwards" : "none",
             }}>
-              <span style={{
-                fontSize: isSubtotal ? 12 : 11,
-                fontWeight: isSubtotal ? 800 : 400,
-                color: isSubtotal ? C.text : C.muted,
-              }}>{r.label}</span>
-              <span style={{
-                fontSize: isSubtotal ? 15 : 12,
-                fontWeight: isSubtotal ? 900 : 700,
-                fontFamily:"'Courier New',monospace",
-                color: r.kind === "final"
-                  ? (r.display >= 0 ? C.green : C.red)
-                  : (r.kind === "minus" ? C.orange : isSubtotal ? C.text : C.green),
-              }}>
-                {r.display >= 0 && r.kind !== "minus" ? "+" : ""}
-                {(Math.round(r.display) || 0).toLocaleString()}万
-              </span>
+              <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+                <span style={{
+                  fontSize: isSubtotal ? 12 : 11,
+                  fontWeight: isSubtotal ? 800 : (r.indent ? 400 : 400),
+                  color: isSubtotal ? C.text : (r.indent ? C.muted : C.muted),
+                  opacity: r.indent ? 0.85 : 1,
+                }}>{r.label}</span>
+                <span style={{
+                  fontSize: isSubtotal ? 15 : 12,
+                  fontWeight: isSubtotal ? 900 : 700,
+                  fontFamily:"'Courier New',monospace",
+                  color: r.kind === "final"
+                    ? (r.display >= 0 ? C.green : C.red)
+                    : (r.kind === "minus" ? C.orange : isSubtotal ? C.text : C.green),
+                }}>
+                  {r.display >= 0 && r.kind !== "minus" ? "+" : ""}
+                  {(Math.round(r.display) || 0).toLocaleString()}万
+                </span>
+              </div>
+              {r.detail && (
+                <div style={{fontSize:9, color:C.muted, opacity:0.7, marginTop:2, textAlign:"right"}}>
+                  {r.detail}
+                </div>
+              )}
             </div>
           );
         })}
@@ -1893,7 +1954,7 @@ function PLTable({pl}) {
     ["売上総利益",       pl.grossProfit,                true],
     ["予算投資費用",    -pl.allocSga,                  false,C.muted],
     ["特別アクション費",-pl.sgaAdd,                    false,pl.sgaAdd>0?C.orange:C.muted],
-    ["店舗変動費",      -pl.varCost,                   false,C.orange],
+    ["顧客あたり運用コスト",      -pl.varCost,                   false,C.orange],
     ["固定運営費",      -pl.opex,                      false,C.red],
     ["開発費（償却）",  -pl.depAmt,                    false,C.purple],
     ["営業利益",         pl.operatingProfit,            true,pl.operatingProfit>=0?C.green:C.red],
@@ -2836,7 +2897,13 @@ export default function App() {
       // PL計算
       const dep = Math.floor(pBs.softwareAsset * SW_DEP_RATE);
       pBs.softwareAsset -= dep;
-      const interest = Math.floor(pBs.debt * INTEREST_RATE);
+
+      // ★ Stage3: ローンスケジュールに基づく返済処理（ソロモードと統一）
+      const loanCalc = calcLoanRepayment(pBs);
+      const interest = loanCalc.interestPaid;
+      const principalPaid = loanCalc.principalPaid;
+      pBs.loanSchedule = loanCalc.newSchedule;
+      pBs.debt = Math.max(0, pBs.debt - principalPaid);
 
       let allocSga = 0, allocCap = 0;
       BUDGET_ITEMS.forEach(item => {
@@ -2848,11 +2915,14 @@ export default function App() {
       const revenue = calcRevenue(finalOps, market);
       const cogs = Math.floor(revenue * 0.25);
       const varCost = calcVarCost(finalOps, market);
-      const totalSga = allocSga + sgaAdd + baseOpex + varCost;
+      // ★ 営業力強化＝人員増強と解釈。ソロモードと統一
+      const salesOpexAddon = calcSalesOpexAddon(finalOps.salesPower);
+      const totalBaseOpex = baseOpex + salesOpexAddon;
+      const totalSga = allocSga + sgaAdd + totalBaseOpex + varCost;
       const operatingProfit = revenue - cogs - totalSga - dep;
       const netIncome = operatingProfit - interest;
 
-      pBs.cash += revenue - cogs - varCost - baseOpex - allocSga - sgaAdd - allocCap - interest;
+      pBs.cash += revenue - cogs - varCost - totalBaseOpex - allocSga - sgaAdd - allocCap - interest - principalPaid;
       pBs.retainedEarnings += netIncome;
 
       const newUsed = special && SPECIAL_ACTIONS[special]?.oneTime
@@ -2869,8 +2939,8 @@ export default function App() {
 
       const pl = {
         revenue, cogs, grossProfit: revenue-cogs, varCost,
-        allocSga, allocCap, sgaAdd, opex: baseOpex, totalSga,
-        depAmt: dep, interestExpense: interest,
+        allocSga, allocCap, sgaAdd, opex: totalBaseOpex, baseOpexCore: baseOpex, salesOpexAddon, totalSga,
+        depAmt: dep, interestExpense: interest, principalPaid,
         operatingProfit, netIncome,
         competResult: {
           newFromUnclaimed: cr.newFromUnclaimed || 0,
@@ -2880,6 +2950,8 @@ export default function App() {
           finalStores: cr.finalStores,
         },
         playerAlloc: alloc, playerSpecial: special,
+        market: { arpu: market.arpu, varCostPerStore: market.varCostPerStore },
+        priceMultiplier: finalOps.priceMultiplier,
       };
       quarterLogs[pid] = { pl, event: null, narratives: [] };
     });
@@ -2909,6 +2981,7 @@ export default function App() {
       ...n,
       bs:{...PLAYER_TYPES[n.type].bs},
       ops:{...PLAYER_TYPES[n.type].ops},
+      usedSpecials:[],
     })));
     setPlayerType(ptId);
     // ★ 初回も価格設定を行う
@@ -3073,7 +3146,7 @@ export default function App() {
       const myScore2 = competitiveScore(finalOps, market?.arpu);
       const enrichedResult2 = {...pl.competResult, quarter, myScore:myScore2, rivalScores:finalNpcs.map(n=>competitiveScore(n.ops, market?.arpu))};
       const newNarratives2 = generateCompetitiveNarrative(enrichedResult2, finalNpcs, prevNpcOps, getPhase(quarter));
-      setHistory(h=>[...h,{quarter,totalAssets:totalAssets(finalBs),stores:Math.floor(finalOps.stores)||0,netIncome:pl.netIncome,phase:getPhase(quarter).name,npcSnapshot:finalNpcs.map(n=>({id:n.id,name:n.name,color:n.color,stores:Math.floor(n.ops.stores)||0,totalAssets:totalAssets(n.bs)}))}]);
+      setHistory(h=>[...h,{quarter,netWorth:equity(finalBs),stores:Math.floor(finalOps.stores)||0,netIncome:pl.netIncome,phase:getPhase(quarter).name,npcSnapshot:finalNpcs.map(n=>({id:n.id,name:n.name,color:n.color,stores:Math.floor(n.ops.stores)||0,netWorth:equity(n.bs)}))}]);
       setPrevNpcOps(Object.fromEntries(finalNpcs.map(n=>[n.id,{...n.ops}])));
       setBs(finalBs); setOps(finalOps); setNpcs(finalNpcs);
       setUsedSpecials(newUsedSpecials); setLastPL({...pl,competResult:enrichedResult2}); setLastEvent(ev);
@@ -3091,7 +3164,7 @@ export default function App() {
     const enrichedResult = {...pl.competResult, quarter, myScore, rivalScores:finalNpcs.map(n=>competitiveScore(n.ops, market?.arpu))};
     const newNarratives = generateCompetitiveNarrative(enrichedResult, finalNpcs, prevNpcOps, getPhase(quarter));
 
-    setHistory(h=>[...h,{quarter,totalAssets:totalAssets(finalBs),stores:Math.floor(finalOps.stores)||0,netIncome:pl.netIncome,phase:getPhase(quarter).name,npcSnapshot:finalNpcs.map(n=>({id:n.id,name:n.name,color:n.color,stores:Math.floor(n.ops.stores)||0,totalAssets:totalAssets(n.bs)}))}]);
+    setHistory(h=>[...h,{quarter,netWorth:equity(finalBs),stores:Math.floor(finalOps.stores)||0,netIncome:pl.netIncome,phase:getPhase(quarter).name,npcSnapshot:finalNpcs.map(n=>({id:n.id,name:n.name,color:n.color,stores:Math.floor(n.ops.stores)||0,netWorth:equity(n.bs)}))}]);
     setPrevNpcOps(Object.fromEntries(finalNpcs.map(n=>[n.id,{...n.ops}])));
     setBs(finalBs); setOps(finalOps); setNpcs(finalNpcs);
     setUsedSpecials(newUsedSpecials); setLastPL({...pl,competResult:enrichedResult}); setLastEvent(ev);
@@ -3208,9 +3281,9 @@ export default function App() {
   const phase=getPhase(quarter);
 
   const allPlayers = bs ? [
-    {id:"player",name:"あなた",icon:"⭐",color:C.cyan,isPlayer:true,totalAssets:totalAssets(bs),stores:Math.floor(ops.stores)||0,bs,ops},
-    ...npcs.map(n=>({...n,totalAssets:totalAssets(n.bs),stores:Math.floor(n.ops.stores)||0}))
-  ].sort((a,b)=>b.totalAssets-a.totalAssets) : [];
+    {id:"player",name:"あなた",icon:"⭐",color:C.cyan,isPlayer:true,netWorth:equity(bs),totalAssets:totalAssets(bs),stores:Math.floor(ops.stores)||0,bs,ops},
+    ...npcs.map(n=>({...n,netWorth:equity(n.bs),totalAssets:totalAssets(n.bs),stores:Math.floor(n.ops.stores)||0}))
+  ].sort((a,b)=>b.netWorth-a.netWorth) : [];
 
   if (screen==="tutorial") return (
     <TutorialScreen onComplete={()=>{
@@ -3332,25 +3405,25 @@ export default function App() {
     const yearHistory = history.filter(h => h.quarter >= qStart && h.quarter <= qEnd);
 
     // ★ 直接bs/opsから取る（historyが空でも表示できる）
-    const yearEndTA     = totalAssets(bs);
+    const yearEndTA     = equity(bs);
     const yearEndStores = Math.floor(ops.stores) || 0;
 
     const prevYearEndTA = completedYear > 1
-      ? (history.find(h => h.quarter === qStart - 1)?.totalAssets || 0)
-      : totalAssets(PLAYER_TYPES[playerType]?.bs || {cash:0, softwareAsset:0, otherAsset:0});
+      ? (history.find(h => h.quarter === qStart - 1)?.netWorth || 0)
+      : equity(PLAYER_TYPES[playerType]?.bs || {capital:0, retainedEarnings:0});
     const taGrowth = yearEndTA - prevYearEndTA;
 
     const phaseNext = getPhase(qEnd + 1);
 
     // グラフ用：historyがあれば使い、なければ現在値だけ
     const chartData = yearHistory.length > 0 ? yearHistory : [{
-      quarter: qEnd, totalAssets: yearEndTA, stores: yearEndStores,
+      quarter: qEnd, netWorth: yearEndTA, stores: yearEndStores,
       netIncome: lastNetIncome, phase: getPhase(qEnd).name
     }];
-    const maxTA     = Math.max(...chartData.map(h => h.totalAssets), yearEndTA, 1);
+    const maxTA     = Math.max(...chartData.map(h => h.netWorth), yearEndTA, 1);
     const maxStores = Math.max(...chartData.map(h => h.stores), yearEndStores, 1);
     const lastSnapshot = yearHistory[yearHistory.length-1]?.npcSnapshot
-      || npcs.map(n => ({id:n.id, name:n.name, color:n.color, stores:Math.floor(n.ops.stores)||0, totalAssets:totalAssets(n.bs)}));
+      || npcs.map(n => ({id:n.id, name:n.name, color:n.color, stores:Math.floor(n.ops.stores)||0, netWorth:equity(n.bs)}));
 
     return (
       <div style={bgBase}>
@@ -3382,17 +3455,17 @@ export default function App() {
             ))}
           </div>
 
-          {/* 総資産推移バーグラフ */}
+          {/* 純資産推移バーグラフ */}
           <Panel style={{marginBottom:14}}>
-            <Label style={{display:"block", marginBottom:10}}>総資産推移（Year {completedYear}）</Label>
+            <Label style={{display:"block", marginBottom:10}}>純資産推移（Year {completedYear}）</Label>
             <div style={{display:"flex", alignItems:"flex-end", gap:6, height:80}}>
               {chartData.map((h,i)=>(
                 <div key={i} style={{flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:4}}>
                   <div style={{fontSize:9, color:C.muted, fontFamily:"'Courier New',monospace"}}>
-                    ¥{Math.round(h.totalAssets/100)/10}k
+                    ¥{Math.round(h.netWorth/100)/10}k
                   </div>
                   <div style={{width:"100%", background:h.netIncome>=0?C.cyan:C.red, borderRadius:"3px 3px 0 0",
-                    height:`${Math.max(4, h.totalAssets/maxTA*64)}px`,
+                    height:`${Math.max(4, h.netWorth/maxTA*64)}px`,
                     boxShadow:`0 0 8px ${h.netIncome>=0?C.cyan:C.red}66`, transition:"height 0.4s"}}/>
                   <span style={{fontSize:9, color:C.muted}}>Q{((h.quarter-1)%4)+1}</span>
                 </div>
@@ -3475,7 +3548,7 @@ export default function App() {
           <h1 style={{fontSize:30,fontWeight:900,margin:0,background:`linear-gradient(135deg,${C.text},${C.cyan})`,WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>GAME OVER</h1>
           <div style={{color:C.muted,margin:"10px 0 32px",fontSize:13}}>3年間の経営シミュレーション終了</div>
           <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12,marginBottom:28}}>
-            {[["🏦 総資産",`¥${totalAssets(pf?.bs||{cash:0,softwareAsset:0,otherAsset:0}).toLocaleString()}万`,C.cyan],
+            {[["💰 純資産",`¥${equity(pf?.bs||{capital:0,retainedEarnings:0}).toLocaleString()}万`,C.cyan],
               ["🏪 最終店舗",`${pf?.stores||0}店`,C.green],
               ["🏅 順位",`${rank}位`,rank===1?C.yellow:C.text]
             ].map(([l,v,c])=>(
@@ -3486,7 +3559,7 @@ export default function App() {
             ))}
           </div>
           <Panel style={{marginBottom:28}}>
-            <Label style={{display:"block",marginBottom:12}}>最終スコアボード（総資産）</Label>
+            <Label style={{display:"block",marginBottom:12}}>最終スコアボード（純資産）</Label>
             {allPlayers.map((p,i)=>(
               <div key={p.id} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 0",borderBottom:i<allPlayers.length-1?`1px solid ${C.border}`:"none"}}>
                 <span style={{fontSize:20}}>{i===0?"🥇":i===1?"🥈":"🥉"}</span>
@@ -3495,7 +3568,7 @@ export default function App() {
                   <div style={{fontSize:13,fontWeight:700,color:p.color}}>{p.name}</div>
                 </div>
                 <div style={{textAlign:"right"}}>
-                  <div style={{fontSize:15,fontWeight:900,color:C.cyan,fontFamily:"'Courier New',monospace"}}>¥{p.totalAssets.toLocaleString()}万</div>
+                  <div style={{fontSize:15,fontWeight:900,color:C.cyan,fontFamily:"'Courier New',monospace"}}>¥{p.netWorth.toLocaleString()}万</div>
                   <div style={{fontSize:10,color:C.muted}}>{p.stores}店舗</div>
                 </div>
               </div>
@@ -3705,7 +3778,7 @@ export default function App() {
                     </div>
                     <div style={{textAlign:"right"}}>
                       <div style={{fontSize:13,fontWeight:700,color:C.cyan,fontFamily:"'Courier New',monospace"}}>
-                        ¥{totalAssets(n.bs).toLocaleString()}万
+                        ¥{equity(n.bs).toLocaleString()}万
                       </div>
                       <div style={{fontSize:10,color:C.muted}}>
                         {n.ops.stores}店 / score:{nScore.toFixed(0)}
@@ -3759,7 +3832,11 @@ export default function App() {
           )}
 
           <button onClick={advance} style={{marginTop:18,width:"100%",background:`linear-gradient(135deg,#006080,${C.cyan})`,color:"#fff",border:"none",borderRadius:10,padding:14,fontSize:14,fontWeight:700,cursor:"pointer",letterSpacing:2}}>
-            {quarter>=MAX_QUARTERS?"最終結果を見る 🏁":`Year ${Math.ceil((quarter+1)/4)} Q${(quarter%4)+1} へ →`}
+            {quarter>=MAX_QUARTERS
+              ? "最終結果を見る 🏁"
+              : quarter%4===0
+                ? `Year ${quarter/4} 振り返りへ →`
+                : `Year ${Math.ceil((quarter+1)/4)} Q${(quarter%4)+1} へ →`}
           </button>
         </div>
       </div>
@@ -3794,8 +3871,8 @@ export default function App() {
             </div>
           </div>
           <div style={{textAlign:"right"}}>
-            <div style={{fontSize:9,color:C.muted,letterSpacing:2,textTransform:"uppercase"}}>総資産（勝利条件）</div>
-            <div style={{fontSize:18,fontWeight:900,color:C.cyan,fontFamily:"'Courier New',monospace"}}>¥{totalAssets(bs).toLocaleString()}万</div>
+            <div style={{fontSize:9,color:C.muted,letterSpacing:2,textTransform:"uppercase"}}>純資産（勝利条件）</div>
+            <div style={{fontSize:18,fontWeight:900,color:C.cyan,fontFamily:"'Courier New',monospace"}}>¥{equity(bs).toLocaleString()}万</div>
             <div style={{fontSize:10,color:bs.cash<50?C.red:C.muted}}>現預金 ¥{bs.cash}万</div>
           </div>
         </div>
@@ -3804,8 +3881,8 @@ export default function App() {
       <div style={{maxWidth:900,margin:"0 auto",padding:"16px 16px 40px"}}>
         {/* KPI Row */}
         <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:8,marginBottom:16}}>
-          {[["🏦 総資産",`¥${totalAssets(bs).toLocaleString()}万`,C.cyan,true],
-            ["💚 純資産",`¥${equity(bs).toLocaleString()}万`,equity(bs)>=0?C.green:C.red],
+          {[["💰 純資産",`¥${equity(bs).toLocaleString()}万`,equity(bs)>=0?C.cyan:C.red,true],
+            ["🏦 総資産",`¥${totalAssets(bs).toLocaleString()}万`,C.muted],
             ["🏪 店舗数",`${ops.stores}店`,C.text],
             ["💳 借入金",`¥${bs.debt}万`,bs.debt>0?C.yellow:C.muted],
             ["🎯 競争力",`${competitiveScore(ops, market?.arpu).toFixed(0)}`,C.purple],
@@ -4035,14 +4112,14 @@ export default function App() {
 
             {history.length>0&&(
               <Panel style={{marginTop:14}}>
-                <Label style={{display:"block",marginBottom:10}}>総資産推移</Label>
+                <Label style={{display:"block",marginBottom:10}}>純資産推移</Label>
                 <div style={{display:"flex",alignItems:"flex-end",gap:4,height:70}}>
                   {history.map((h,i)=>{
-                    const max=Math.max(...history.map(x=>x.totalAssets),totalAssets(bs),1);
+                    const max=Math.max(...history.map(x=>x.netWorth),equity(bs),1);
                     return (
                       <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
                         <div style={{width:"100%",background:h.netIncome>=0?C.cyan:C.red,borderRadius:"3px 3px 0 0",
-                          height:`${Math.max(3,h.totalAssets/max*60)}px`,transition:"height 0.3s",
+                          height:`${Math.max(3,h.netWorth/max*60)}px`,transition:"height 0.3s",
                           boxShadow:`0 0 6px ${h.netIncome>=0?C.cyan:C.red}66`}}/>
                         <span style={{fontSize:8,color:C.muted}}>Q{h.quarter}</span>
                       </div>
@@ -4105,7 +4182,7 @@ export default function App() {
               <Panel>
                 <Label style={{display:"block",marginBottom:10}}>経営指標</Label>
                 {[["推計売上/Q",`¥${calcRevenue(ops,market).toLocaleString()}万`],
-                  ["解約率",`${(calcChurn(ops)*100).toFixed(1)}%`],
+                  ["解約率",`${(calcChurn(ops,market?.arpu)*100).toFixed(1)}%`],
                   ["利息負担/Q",`¥${Math.floor(bs.debt*INTEREST_RATE)}万`],
                   ["SW償却/Q",`¥${Math.floor(bs.softwareAsset*SW_DEP_RATE)}万`],
                   ["市場残余",`${Math.max(0,Math.floor(market.totalStores*marketPenetration(quarter))-[ops,...npcs.map(n=>n.ops)].reduce((s,o)=>s+o.stores,0))}店`],
@@ -4140,7 +4217,7 @@ export default function App() {
               if(yearHistory.length===0) return null;
               const lastQ = yearHistory[yearHistory.length-1];
               const firstQ = yearHistory[0];
-              const taGrowth = lastQ.totalAssets - (history.find(h=>h.quarter===qStart-1)?.totalAssets || (yr===1?totalAssets(PLAYER_TYPES[playerType]?.bs||{cash:0,softwareAsset:0,otherAsset:0}):0));
+              const taGrowth = lastQ.netWorth - (history.find(h=>h.quarter===qStart-1)?.netWorth || (yr===1?equity(PLAYER_TYPES[playerType]?.bs||{capital:0,retainedEarnings:0}):0));
               const phaseLabel = yr===1?"🌅 黎明期":yr===2?"🚀 急成長":"🏁 成熟期";
               const yearDone = quarter > qEnd;
               return (
@@ -4177,7 +4254,7 @@ export default function App() {
                       <div style={{fontSize:13,fontWeight:800,color:taGrowth>=0?C.green:C.red,fontFamily:"'Courier New',monospace"}}>
                         {taGrowth>=0?"+":""}{taGrowth.toLocaleString()}万
                       </div>
-                      <div style={{fontSize:9,color:C.muted}}>総資産増減</div>
+                      <div style={{fontSize:9,color:C.muted}}>純資産増減</div>
                     </div>
                     <div style={{textAlign:"center"}}>
                       <div style={{fontSize:13,fontWeight:800,color:C.text,fontFamily:"'Courier New',monospace"}}>
