@@ -676,13 +676,15 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
   const netIncome       = operatingProfit - interest;
 
   // ★ BS整合：
-  // cash変動   = rev - cogs - varCost - opex(addon込み) - allocSga - sgaAdd - allocCapitalize - interest - principalPaid
+  // sgaAdd（特別アクションのコスト）はapplySpecialActionの段階で既にpBs.cashから引かれている。
+  // ここで再度引くと二重減算になるため、cash計算からは除外する（retainedEarningsにはnetIncome経由で引き続き計上）。
+  // cash変動   = rev - cogs - varCost - opex(addon込み) - allocSga - allocCapitalize - interest - principalPaid
   // retainedΔ = rev - cogs - varCost - opex(addon込み) - allocSga - sgaAdd - dep - interest  (= netIncome)
   // debtΔ      = -principalPaid
   // swAssetΔ  = allocCapitalize - dep
-  // totalAssetsΔ = cashΔ + swΔ = netIncome - principalPaid
-  // 負債純資産側Δ = retainedΔ + debtΔ = netIncome - principalPaid ✓ 一致
-  pBs.cash += revenue - cogs - varCost - totalBaseOpex - allocSga - sgaAdd - allocCapitalize - interest - principalPaid;
+  // totalAssetsΔ = cashΔ + swΔ = (netIncome + sgaAdd - dep) + (allocCapitalize - dep) ... 整理すると以下で一致：
+  // 負債純資産側Δ = retainedΔ + debtΔ = netIncome - principalPaid ✓ 一致（sgaAddはcash側で引かない分、両辺で相殺）
+  pBs.cash += revenue - cogs - varCost - totalBaseOpex - allocSga - allocCapitalize - interest - principalPaid;
   pBs.retainedEarnings += netIncome; // netIncome = rev-cogs-varCost-opex-allocSga-sgaAdd-dep-interest
 
   const pl = {
@@ -2246,7 +2248,7 @@ function TutorialScreen({ onComplete }) {
     // ===== スライド2：勝利条件 =====
     {
       title: "勝つのは誰だ？",
-      subtitle: "3年後の総資産で決まる",
+      subtitle: "3年後の純資産で決まる",
       content: (
         <div>
           {/* 時系列イメージ */}
@@ -2271,8 +2273,8 @@ function TutorialScreen({ onComplete }) {
           <div style={{background:`${C.cyan}15`,border:`1px solid ${C.cyan}44`,borderRadius:12,padding:"16px",textAlign:"center"}}>
             <div style={{fontSize:14,color:C.muted,marginBottom:6}}>勝利条件</div>
             <div style={{fontSize:22,fontWeight:900,color:C.cyan}}>12Q終了時の</div>
-            <div style={{fontSize:22,fontWeight:900,color:C.cyan}}>総資産（現金＋資産）最大</div>
-            <div style={{fontSize:11,color:C.muted,marginTop:8}}>店舗を増やして売上を積み上げ、賢く投資して資産を作れ</div>
+            <div style={{fontSize:22,fontWeight:900,color:C.cyan}}>純資産（資本金＋利益剰余金）最大</div>
+            <div style={{fontSize:11,color:C.muted,marginTop:8}}>店舗を増やして売上を積み上げ、借りすぎず賢く投資して資産を作れ</div>
           </div>
         </div>
       ),
@@ -2922,7 +2924,8 @@ export default function App() {
       const operatingProfit = revenue - cogs - totalSga - dep;
       const netIncome = operatingProfit - interest;
 
-      pBs.cash += revenue - cogs - varCost - totalBaseOpex - allocSga - sgaAdd - allocCap - interest - principalPaid;
+      // ★ sgaAddはapplySpecialActionで既にpBs.cashから引かれているため、ここでは引かない（二重減算回避）
+      pBs.cash += revenue - cogs - varCost - totalBaseOpex - allocSga - allocCap - interest - principalPaid;
       pBs.retainedEarnings += netIncome;
 
       const newUsed = special && SPECIAL_ACTIONS[special]?.oneTime
@@ -3492,9 +3495,9 @@ export default function App() {
           {/* 競合比較 */}
           {lastSnapshot.length > 0 && (
             <Panel style={{marginBottom:14}}>
-              <Label style={{display:"block", marginBottom:10}}>期末シェア比較</Label>
-              {[{name:"あなた", stores:yearEndStores, color:C.cyan, ta:yearEndTA}, ...lastSnapshot.map(n=>({name:n.name, stores:n.stores, color:n.color, ta:n.totalAssets}))].map((p,i)=>{
-                const maxTAAll = Math.max(...[yearEndTA, ...lastSnapshot.map(n=>n.totalAssets)], 1);
+              <Label style={{display:"block", marginBottom:10}}>期末シェア比較（純資産）</Label>
+              {[{name:"あなた", stores:yearEndStores, color:C.cyan, ta:yearEndTA}, ...lastSnapshot.map(n=>({name:n.name, stores:n.stores, color:n.color, ta:n.netWorth}))].map((p,i)=>{
+                const maxTAAll = Math.max(...[yearEndTA, ...lastSnapshot.map(n=>n.netWorth)], 1);
                 return (
                   <div key={i} style={{marginBottom:10}}>
                     <div style={{display:"flex", justifyContent:"space-between", marginBottom:4}}>
@@ -4285,7 +4288,7 @@ export default function App() {
               );
             })}
             <Panel>
-              <Label style={{display:"block",marginBottom:14}}>スコアボード — 勝利条件: 総資産最大</Label>
+              <Label style={{display:"block",marginBottom:14}}>スコアボード — 勝利条件: 純資産最大</Label>
               {allPlayers.map((p,i)=>(
                 <div key={p.id} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 8px",
                   borderBottom:i<allPlayers.length-1?`1px solid ${C.border}`:"none",
@@ -4294,11 +4297,11 @@ export default function App() {
                   <span style={{fontSize:20}}>{p.icon}</span>
                   <div style={{flex:1}}>
                     <div style={{fontSize:13,fontWeight:700,color:p.color}}>{p.name}</div>
-                    <div style={{fontSize:10,color:C.muted}}>{p.stores}店 | 純資産¥{equity(p.bs).toLocaleString()}万 | score:{competitiveScore(p.ops, market?.arpu).toFixed(0)}</div>
+                    <div style={{fontSize:10,color:C.muted}}>{p.stores}店 | 総資産¥{p.totalAssets.toLocaleString()}万 | score:{competitiveScore(p.ops, market?.arpu).toFixed(0)}</div>
                   </div>
                   <div style={{textAlign:"right"}}>
-                    <div style={{fontSize:16,fontWeight:900,color:C.cyan,fontFamily:"'Courier New',monospace"}}>¥{p.totalAssets.toLocaleString()}万</div>
-                    <div style={{fontSize:9,color:C.muted}}>総資産</div>
+                    <div style={{fontSize:16,fontWeight:900,color:C.cyan,fontFamily:"'Courier New',monospace"}}>¥{p.netWorth.toLocaleString()}万</div>
+                    <div style={{fontSize:9,color:C.muted}}>純資産</div>
                   </div>
                 </div>
               ))}
