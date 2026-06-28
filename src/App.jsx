@@ -10,15 +10,15 @@ import { useRoom, GAME_VERSION, TUTORIAL_KEY, clearRoomStorage } from "./useRoom
 
 const MARKETS = {
   food:   { id:"food",   name:"飲食 モバイルオーダー", icon:"🍜", color:"#FF6B35",
-            arpu:80,  totalStores:800, varCostPerStore:0.5, entryDiff:1,
+            arpu:80,  totalStores:800, varCostPerStore:0.5, cogsPerStore:14, entryDiff:1,
             priceSensitivity:0.60,
             desc:"参入しやすく競合が激しい。シェアを早く取れるかが勝負。" },
   retail: { id:"retail", name:"小売店 会員証",        icon:"🏪", color:"#06B6D4",
-            arpu:140, totalStores:400, varCostPerStore:0.8, entryDiff:3,
+            arpu:140, totalStores:400, varCostPerStore:0.8, cogsPerStore:25, entryDiff:3,
             priceSensitivity:0.50,
             desc:"導入ハードルが高い。大手獲得で一気に優位に立てる。" },
   beauty: { id:"beauty", name:"美容室 予約サービス",  icon:"✂️", color:"#A855F7",
-            arpu:200, totalStores:300, varCostPerStore:1.2, entryDiff:2,
+            arpu:200, totalStores:300, varCostPerStore:1.2, cogsPerStore:35, entryDiff:2,
             priceSensitivity:0.75,
             desc:"競合が少なくARPUが高い。品質で差をつけるか価格で攻めるか。" },
 };
@@ -68,6 +68,28 @@ function calcInvestCapacity(bs, playerType, lastNetIncome) {
   return fromCash + fromFCF;
 }
 
+// ============================================================
+// ④ プレイ履歴：localStorageに過去のプレイ結果を保存し、振り返れるようにする
+// ============================================================
+const PLAY_HISTORY_KEY = "saas_battle_play_history_v1";
+const PLAY_HISTORY_MAX = 20; // 直近20件まで保持
+
+function loadPlayHistory() {
+  try {
+    const raw = localStorage.getItem(PLAY_HISTORY_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+function savePlayRecord(record) {
+  try {
+    const list = loadPlayHistory();
+    list.unshift(record); // 新しい順
+    const trimmed = list.slice(0, PLAY_HISTORY_MAX);
+    localStorage.setItem(PLAY_HISTORY_KEY, JSON.stringify(trimmed));
+    return trimmed;
+  } catch { return []; }
+}
+
 const NPC_PROFILES = [
   { id:"npc1", name:"グローバルウェア", type:"vendor",  icon:"🏢", color:"#EF4444", strategy:"sales_heavy" },
   { id:"npc2", name:"ネクストビット",   type:"startup", icon:"⚡", color:"#10B981", strategy:"dev_heavy"   },
@@ -93,6 +115,29 @@ const BUDGET_ITEMS = [
     param:"supportQuality",  basePer100:0.9, decay:0.8, capitalize:false,
     desc:"supportQuality上昇（逓減あり）。未投資で毎Q-0.8。" },
 ];
+
+// ============================================================
+// ★ 機能投資のミスマッチリスク：devへの投資は「顧客価値の方向性」を選ぶ
+// 市場の顧客ニーズは見えないまま緩やかに変動し、選択と一致すればボーナス、外れれば減衰
+// ============================================================
+const DEV_FOCUS_TYPES = {
+  efficiency: { id:"efficiency", name:"業務効率化",   icon:"⏱️", desc:"時間・手間を減らす機能。既存顧客の継続利用に効く。" },
+  uiux:       { id:"uiux",       name:"UI/UX向上",   icon:"✨", desc:"使い心地・見た目の良さ。新規顧客の指名買いに効く。" },
+  reliability:{ id:"reliability",name:"信頼性機能",   icon:"🛡️", desc:"セキュリティ・安定性・サポート体制。高単価顧客の維持に効く。" },
+};
+const DEV_FOCUS_KEYS = Object.keys(DEV_FOCUS_TYPES);
+const DEV_MATCH_BONUS = 1.3;   // 市場ニーズと一致した場合の効果倍率
+const DEV_MISMATCH_PENALTY = 0.8; // 不一致だった場合の効果倍率
+
+// 市場の顧客ニーズを更新する（Qごとに緩やかに変動：70%維持・30%でランダムシフト）
+function evolveMarketNeed(currentNeed) {
+  if (!currentNeed) return DEV_FOCUS_KEYS[Math.floor(Math.random() * DEV_FOCUS_KEYS.length)];
+  if (Math.random() < 0.3) {
+    const others = DEV_FOCUS_KEYS.filter(k => k !== currentNeed);
+    return others[Math.floor(Math.random() * others.length)];
+  }
+  return currentNeed;
+}
 
 // パラメータ上限を150に引き上げ（カンストしにくくし、高値追求に意味を持たせる）
 const PARAM_MAX = 150;
@@ -265,13 +310,13 @@ function maxBorrowable(bs) {
 
 function competitiveScore(ops, baseArpu) {
   const bc = Math.log2(1 + ops.brandAwareness) / Math.log2(101);
-  // 価格スコア：指数0.5（急峻カーブ）
-  // 値上げは急激にスコアが落ち、値下げは急激に上がる
+  // 価格スコア：指数0.5カーブ。値上げ・値下げどちらも極端になるほど連続的に効果が強まる
+  // （旧実装はMath.max(0,...)で+50%超の値上げから効果が完全に飽和してしまうバグがあったため撤廃）
   const priceScore = (baseArpu && ops.setPrice)
     ? (() => {
         const ratio = (ops.setPrice - baseArpu) / baseArpu;
         const curved = Math.sign(ratio) * Math.pow(Math.abs(ratio), 0.5);
-        return Math.max(0, Math.min(100, 50 - curved * 80));
+        return 50 - curved * 40; // 下限・上限なしで連続的に変化。±100%値上げ/値下げ付近で±40pt相当
       })()
     : 50;
   return ops.salesPower * 0.30 + ops.solutionQuality * 0.25
@@ -282,9 +327,11 @@ function calcChurn(ops, baseArpu) {
   const base = 0.12;
   // ★ C案：値上げするほど自然解約が増える（高単価戦略の代償）
   // 値上げ+100%で+30%の解約率上乗せ。値下げはペナルティなし（現状維持）
+  // ★ 上限は0.85（85%）まで拡大。0.45だと+125%超の値上げでchurnが頭打ちになり、
+  //   その先はrevenue増加だけが効いて「極端な値上げほど得」という逆転現象が生じていたため修正。
   const priceRatio = (baseArpu && ops.setPrice) ? ops.setPrice / baseArpu : 1.0;
   const priceEffect = Math.max(0, priceRatio - 1) * 0.30;
-  return Math.max(0.005, Math.min(0.45,
+  return Math.max(0.005, Math.min(0.85,
     base
     - (ops.supportQuality - 50) * 0.0015
     - (ops.solutionQuality - 50) * 0.0006
@@ -295,13 +342,24 @@ function calcChurn(ops, baseArpu) {
 function calcRevenue(ops, market) {
   // ARPUはpriceMultiplier（価格設定）で変動。solutionQualityはスコア経由のみ
   const priceMultiplier = ops.priceMultiplier || 1.0;
-  return Math.floor(ops.stores * market.arpu * priceMultiplier);
+  // ★ 値上げは収益に対数的な減衰カーブを適用（顧客が払える金額には実質的な上限があるため）。
+  // 値下げ（倍率<=1）は線形のまま。値上げ（倍率>1）は対数で鈍化させ、無制限の値上げ得を防ぐ。
+  const effectiveMultiplier = priceMultiplier <= 1
+    ? priceMultiplier
+    : 1 + Math.log(priceMultiplier);
+  return Math.floor(ops.stores * market.arpu * effectiveMultiplier);
 }
 
 // 価格設定からpriceMultiplierを計算
 function calcPriceMultiplier(setPrice, baseArpu) {
   if (!setPrice || setPrice <= 0) return 1.0;
   return setPrice / baseArpu;
+}
+
+// ★ 原価（COGS）は店舗数ベースの固定単価。価格（ARPU設定）には依存しない。
+// サーバー費用・ライセンス費用など「1顧客に提供するコストの実額」のため、価格を変えても変わらない。
+function calcCogs(ops, market) {
+  return Math.floor((ops.stores || 0) * (market.cogsPerStore || market.arpu * 0.25));
 }
 
 function calcVarCost(ops, market) {
@@ -375,14 +433,24 @@ function calcLoanRepayment(bs) {
 // ============================================================
 
 // 前Qに積んだpendingInvestmentをパラメータへ反映する（今Q開始時に実行）
-function commitPendingInvestment(ops, investEfficiency = 1.0) {
+function commitPendingInvestment(ops, investEfficiency = 1.0, currentMarketNeed = null) {
   const pending = ops.pendingInvestment || {};
   let newOps = { ...ops };
   BUDGET_ITEMS.forEach(item => {
     if (item.immediate) return; // ★ 即時反映項目は既にqueuePendingInvestmentで処理済みなのでスキップ
     const invested = pending[item.id] || 0;
     if (invested > 0) {
-      const gain = calcParamGain(newOps[item.param], item.basePer100, invested, investEfficiency);
+      let gain = calcParamGain(newOps[item.param], item.basePer100, invested, investEfficiency);
+      // ★ devのみ：投資時に選んだdevFocusが、反映時点の市場ニーズ（全社共通）と一致するかでボーナス/ペナルティ
+      if (item.id === "dev") {
+        const chosenFocus = pending.devFocus;
+        if (chosenFocus && currentMarketNeed) {
+          gain = Math.round(gain * (chosenFocus === currentMarketNeed ? DEV_MATCH_BONUS : DEV_MISMATCH_PENALTY));
+        }
+        newOps.lastDevFocusResult = chosenFocus
+          ? { focus: chosenFocus, matched: chosenFocus === currentMarketNeed, marketNeed: currentMarketNeed, gain }
+          : null;
+      }
       newOps[item.param] = Math.min(PARAM_MAX, newOps[item.param] + gain);
     } else {
       newOps[item.param] = Math.max(0, newOps[item.param] - item.decay);
@@ -411,6 +479,8 @@ function queuePendingInvestment(ops, allocation, investEfficiency = 1.0) {
       delayedAlloc[item.id] = invested;
     }
   });
+  // ★ devFocus（顧客価値の方向性選択）をpendingに保存。次Q反映時に市場ニーズと比較する
+  if (allocation.devFocus) delayedAlloc.devFocus = allocation.devFocus;
   newOps.pendingInvestment = delayedAlloc;
   return newOps;
 }
@@ -465,7 +535,7 @@ function applySpecialAction(bs, ops, actionId, usedActions) {
 }
 
 // 競争解決
-function resolveMarket(allPlayers, market, quarter, extraUnclaimed = 0) {
+function resolveMarket(allPlayers, market, quarter, extraUnclaimed = 0, truceMap = {}) {
   const phase = getPhase(quarter);
   const penetration = marketPenetration(quarter);
   const totalAvail = Math.floor(market.totalStores * penetration) + extraUnclaimed;
@@ -475,6 +545,9 @@ function resolveMarket(allPlayers, market, quarter, extraUnclaimed = 0) {
   const baseArpu = market?.arpu || 80;
   const scores = allPlayers.map(p => competitiveScore(p.ops, baseArpu));
   const totalScore = scores.reduce((s, x) => s + x, 0);
+
+  // ★ truceMap: { playerId: [相手id, ...] } 不戦条約が成立しているペアの集合
+  const isTruce = (idA, idB) => (truceMap[idA] || []).includes(idB);
 
   // ★ Stage5: 結果への不確実性。乱数係数（中心1.0、範囲は項目ごとに変える）
   // 同じ配分・同じスコアでも毎Q結果が多少ブレる「賭け」の感覚を出す
@@ -487,7 +560,7 @@ function resolveMarket(allPlayers, market, quarter, extraUnclaimed = 0) {
     // 新規獲得：±15%のブレ（市場の動きは完全に予測できない）
     // ★ C案：低価格戦略のメリット強化。標準価格より安いほど新規獲得が加速する
     const myPriceRatio = (market.arpu && player.ops.setPrice) ? player.ops.setPrice / market.arpu : 1.0;
-    const priceFavorBonus = 1 + Math.max(0, (1 - myPriceRatio)) * 0.8; // 半額で+40%ボーナス
+    const priceFavorBonus = 1 + Math.max(0, (1 - myPriceRatio)) * 1.6; // 半額で+80%ボーナス（原価固定化により低価格戦略の構造的不利を補正）
     const rawNewFromUnclaimed = Math.floor(unclaimed * myShare * 0.15 * phase.growthBonus * priceFavorBonus * rand(0.30));
     const newFromUnclaimed = unclaimed > 0 ? Math.max(1, rawNewFromUnclaimed) : 0;
 
@@ -496,6 +569,7 @@ function resolveMarket(allPlayers, market, quarter, extraUnclaimed = 0) {
     const stolenBreakdown = {}; // ★ 相手ID別の奪取量（戦況シーン表示用）
     allPlayers.forEach((rival, j) => {
       if (i === j || rival.ops.stores === 0) return;
+      if (isTruce(player.id, rival.id)) return; // ★ 不戦条約成立中は奪取しない
       const diff = myScore - scores[j];
       if (diff > 0) {
         let rate = Math.min(0.20, (diff / Math.max(scores[j], 1)) * 0.25 * phase.stealMultiplier);
@@ -512,7 +586,7 @@ function resolveMarket(allPlayers, market, quarter, extraUnclaimed = 0) {
         if (myPrice < rivalPrice) {
           const priceDiffRatio = (rivalPrice - myPrice) / rivalPrice;
           const qualityResistance = Math.max(0.3, 1 - rival.ops.solutionQuality / 150); // 品質が高いほど0.3に近づき効果減衰
-          rate += priceDiffRatio * (market.priceSensitivity || 0.6) * 0.6 * qualityResistance;
+          rate += priceDiffRatio * (market.priceSensitivity || 0.6) * 1.0 * qualityResistance;
         }
 
         rate = Math.max(0, Math.min(0.40, rate));
@@ -528,6 +602,7 @@ function resolveMarket(allPlayers, market, quarter, extraUnclaimed = 0) {
     allPlayers.forEach((rival, j) => {
       // ★ 相手の店舗が0の場合、その相手への流出は計上しない（奪取側と対称な仕様に統一）
       if (i === j || player.ops.stores === 0 || rival.ops.stores === 0) return;
+      if (isTruce(player.id, rival.id)) return; // ★ 不戦条約成立中は流出しない
       const diff = scores[j] - myScore;
       if (diff > 0) {
         let rate = Math.min(0.20, (diff / Math.max(myScore, 1)) * 0.25 * phase.stealMultiplier);
@@ -572,15 +647,38 @@ function resolveMarket(allPlayers, market, quarter, extraUnclaimed = 0) {
 
 // 1Qの全処理
 function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
-                        npcs, market, quarter, usedSpecials, playerType) {
+                        npcs, market, quarter, usedSpecials, playerType, marketNeed, truceProposals = []) {
   const phase = getPhase(quarter);
   const pt = PLAYER_TYPES[playerType];
   const investEfficiency = pt?.investEfficiency || 1.0;
   const baseOpex = pt?.baseOpex || 100;
+  // ★ 市場の顧客ニーズ（全社共通、見えない）。次Qに向けて1回だけ更新し、全員が同じ値を参照する
+  const currentMarketNeed = marketNeed || DEV_FOCUS_KEYS[0];
+  const nextMarketNeed = evolveMarketNeed(currentMarketNeed);
+
+  // ★ ③不戦条約：プレイヤーがtruceProposalsで提案したNPCに対し、NPCがランダムに応諾するか判定
+  // 受諾率：自分のスコアが相手より劣っているほど受けやすい（劣勢側が和を結びたがる、という自然な動機）
+  const truceResults = {}; // { npcId: true/false }
+  truceProposals.forEach(npcId => {
+    const npc = npcs.find(n => n.id === npcId);
+    if (!npc) return;
+    const npcScore = competitiveScore(npc.ops, market.arpu);
+    const myScore = competitiveScore(playerOps, market.arpu);
+    const npcDisadvantage = Math.max(0, myScore - npcScore) / Math.max(myScore, npcScore, 1);
+    const acceptChance = Math.min(0.85, 0.35 + npcDisadvantage * 0.6); // 劣勢なほど受けやすい、最大85%
+    truceResults[npcId] = Math.random() < acceptChance;
+  });
+  // ★ 合意成立したペアのみtruceMapに登録（双方向）
+  const truceMap = {};
+  Object.entries(truceResults).forEach(([npcId, accepted]) => {
+    if (!accepted) return;
+    truceMap.player = [...(truceMap.player||[]), npcId];
+    truceMap[npcId] = [...(truceMap[npcId]||[]), "player"];
+  });
 
   // --- Player: Stage1 時間差反映 ---
-  // ①前Qに積んだpendingInvestmentを今Qのパラメータへcommit
-  let pOps = commitPendingInvestment(playerOps, investEfficiency);
+  // ①前Qに積んだpendingInvestmentを今Qのパラメータへcommit（市場ニーズとの一致判定込み）
+  let pOps = commitPendingInvestment(playerOps, investEfficiency, currentMarketNeed);
   // ②今Q配分した額は来Qまでパラメータに反映されない。pendingとして積むだけ
   pOps = queuePendingInvestment(pOps, playerAlloc, investEfficiency);
 
@@ -605,8 +703,10 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
     } else {
       alloc = { sales: nBudget*0.1, dev: nBudget*0.5, marketing: nBudget*0.1, price: nBudget*0.15, cs: nBudget*0.15 };
     }
+    // ★ NPCもdevFocusをランダムに選ぶ（プレイヤーと同じ不確実性を持つ）
+    if (alloc.dev > 0) alloc.devFocus = DEV_FOCUS_KEYS[Math.floor(Math.random() * DEV_FOCUS_KEYS.length)];
     // ①前Qのpendingをcommit ②今Qの配分をpendingとして積む
-    let nOps = commitPendingInvestment(n.ops, nEff);
+    let nOps = commitPendingInvestment(n.ops, nEff, currentMarketNeed);
     nOps = queuePendingInvestment(nOps, alloc, nEff);
     const nUsedSpecials = n.usedSpecials || [];
     const candidateSpecial = n.strategy === "sales_heavy" ? "chain_deal" : "line_collab";
@@ -632,7 +732,7 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
     { id:"player", ops: pOps },
     ...npcProcessed.map(n => ({ id: n.id, ops: n.ops })),
   ];
-  const competResults = resolveMarket(allForCompet, market, quarter);
+  const competResults = resolveMarket(allForCompet, market, quarter, 0, truceMap);
   const pResult = competResults.find(r => r.id === "player");
 
   // --- Player PL確定 ---
@@ -668,7 +768,7 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
   const totalBaseOpex = baseOpex + salesOpexAddon;
 
   const revenue  = calcRevenue(finalPOps, market);
-  const cogs     = Math.floor(revenue * 0.25);
+  const cogs     = calcCogs(finalPOps, market);
   const varCost  = calcVarCost(finalPOps, market);
   const totalSga = allocSga + sgaAdd + totalBaseOpex + varCost;
   const grossProfit     = revenue - cogs;
@@ -696,8 +796,9 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
     phase: phase.name,
     playerAlloc, playerSpecial,
     investEfficiency,
-    market: { arpu: market.arpu, varCostPerStore: market.varCostPerStore }, // ★ PL詳細表示用
+    market: { arpu: market.arpu, varCostPerStore: market.varCostPerStore, cogsPerStore: market.cogsPerStore }, // ★ PL詳細表示用
     priceMultiplier: finalPOps.priceMultiplier,
+    truceResults, // ★ ③不戦条約の合意/拒否結果
   };
 
   // --- NPC PL/BS確定（プレイヤーと同じロジックで計算）---
@@ -728,7 +829,7 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
     // NPC: 借入アクションは取らない設計（Stage3の対象外）。debt=0のままなのでnIntは常に0
     const nInt = Math.floor(nBs.debt * INTEREST_RATE);
     const nRev = calcRevenue(nFinalOps, market);
-    const nCogs = Math.floor(nRev * 0.25);
+    const nCogs = calcCogs(nFinalOps, market);
     const nVarC = calcVarCost(nFinalOps, market);
 
     // ★ 営業力強化＝人員増強と解釈。NPCにも同様に適用（プレイヤーとの公平性のため）
@@ -749,7 +850,7 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
   const newUsedSpecials = playerSpecial && SPECIAL_ACTIONS[playerSpecial]?.oneTime
     ? [...usedSpecials, playerSpecial] : usedSpecials;
 
-  return { pBs, finalPOps, pl, newNpcs, newUsedSpecials };
+  return { pBs, finalPOps, pl, newNpcs, newUsedSpecials, nextMarketNeed };
 }
 
 // NPC予算（opsから逆算）
@@ -780,31 +881,30 @@ function generateCompetitiveNarrative(competResult, npcs, prevNpcOps, phase) {
       type: "lost",
       icon,
       color: cr.lostToRivals >= 10 ? "#F85149" : "#E3B341",
-      text: `競合に ${cr.lostToRivals}店を奪われた。【${severity}】スコア差を縮めないと流出が続く。`,
+      text: `競合に ${cr.lostToRivals}店を奪われた。【${severity}】対策を考えないと流出が続くかもしれない。`,
     });
   }
 
-  // NPC戦略変化の通知
+  // NPC戦略変化の通知（★ 内部パラメータは非公開。店舗数の伸びという観測可能な情報のみ使う）
   npcs.forEach(n => {
     if (!prevNpcOps) return;
     const prev = prevNpcOps[n.id];
-    if (!prev) return;
-    const devGain = n.ops.solutionQuality - prev.solutionQuality;
-    const salesGain = n.ops.salesPower - prev.salesPower;
-    if (devGain >= 3) {
+    if (!prev || !prev.stores) return;
+    const storeDiff = (n.ops.stores||0) - (prev.stores||0);
+    const growthRate = storeDiff / Math.max(1, prev.stores);
+    if (growthRate >= 0.20) {
       messages.push({
-        type: "npc_dev",
-        icon: "🔬",
+        type: "npc_growth",
+        icon: "📈",
         color: n.color,
-        text: `${n.name}がプロダクト開発に注力。品質スコアが+${devGain.toFixed(1)}上昇中。`,
+        text: `${n.name}が前Qから店舗数を大きく伸ばした(${storeDiff>0?"+":""}${storeDiff}店)。何を強化したのかは不明だが、警戒が必要かもしれない。`,
       });
-    }
-    if (salesGain >= 3) {
+    } else if (growthRate <= -0.15) {
       messages.push({
-        type: "npc_sales",
-        icon: "📣",
+        type: "npc_decline",
+        icon: "📉",
         color: n.color,
-        text: `${n.name}が営業を強化。来Qから市場獲得ペースが上がる見込み。`,
+        text: `${n.name}は前Qから店舗数が減少している(${storeDiff}店)。苦戦している様子が見える。`,
       });
     }
   });
@@ -1424,7 +1524,7 @@ const PhaseTag = ({phase}) => (
 // BUDGET ALLOCATOR — スライダーUI + 前回値保持
 // ============================================================
 function BudgetAllocator({ availableBudget, allocation, onChange, bs, playerType, ops }) {
-  const total = Object.values(allocation).reduce((s,v)=>s+(v||0),0);
+  const total = BUDGET_ITEMS.reduce((s,item)=>s+(allocation[item.id]||0),0);
   const remaining = availableBudget - total;
   const pt = PLAYER_TYPES[playerType];
   const safetyBuffer = pt ? pt.baseOpex * 2 : 0;
@@ -1437,7 +1537,9 @@ function BudgetAllocator({ availableBudget, allocation, onChange, bs, playerType
     const val = Math.max(0, Math.min(availableBudget, stepped));
     const otherTotal = total - (allocation[id] || 0);
     const clamped = Math.min(val, availableBudget - otherTotal);
-    onChange({ ...allocation, [id]: clamped });
+    const next = { ...allocation, [id]: clamped };
+    if (id === "dev" && clamped === 0) delete next.devFocus; // devを0にしたら方向性選択もクリア
+    onChange(next);
   };
 
   return (
@@ -1521,6 +1623,31 @@ function BudgetAllocator({ availableBudget, allocation, onChange, bs, playerType
               <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:C.muted,marginTop:2}}>
                 <span>0</span><span>{availableBudget}</span>
               </div>
+              {/* ★ devに配分があるとき：顧客価値の方向性を選ぶ（市場ニーズは非公開、当たり外れがある） */}
+              {item.id === "dev" && val > 0 && (
+                <div style={{marginTop:10, paddingTop:10, borderTop:`1px dashed ${C.border}`}}>
+                  <div style={{fontSize:10, color:C.muted, marginBottom:6}}>
+                    🎯 どの顧客価値を伸ばす？（市場の反応は来Q判明）
+                  </div>
+                  <div style={{display:"flex", gap:6}}>
+                    {Object.values(DEV_FOCUS_TYPES).map(f => (
+                      <button key={f.id}
+                        onClick={() => onChange({ ...allocation, devFocus: f.id })}
+                        style={{
+                          flex:1, padding:"8px 4px", borderRadius:8,
+                          border:`1.5px solid ${allocation.devFocus===f.id ? C.purple : C.border}`,
+                          background: allocation.devFocus===f.id ? `${C.purple}18` : C.bg,
+                          cursor:"pointer", textAlign:"center",
+                        }}>
+                        <div style={{fontSize:16}}>{f.icon}</div>
+                        <div style={{fontSize:9, fontWeight:700, color: allocation.devFocus===f.id ? C.purple : C.muted, marginTop:2}}>
+                          {f.name}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           );
         })}
@@ -1804,13 +1931,19 @@ function PLBuildAnimation({ pl, quarter, onComplete }) {
 
   const stores = pl.competResult?.finalStores || 0;
   const arpu = pl.market?.arpu;
-  const priceMultiplier = pl.priceMultiplier;
+  const priceMultiplier = pl.priceMultiplier || 1.0;
+  // ★ 値上げ時は対数減衰が効くため、表示上も「実効倍率」を見せる（設定倍率とズレることを明示）
+  const effectiveMultiplier = priceMultiplier <= 1 ? priceMultiplier : 1 + Math.log(priceMultiplier);
+  const isDiminished = priceMultiplier > 1;
 
   // 表示する行（小計を都度計算）。detail: 補足説明（小さい文字で内訳を出す）
   const rows = [
     { label:"売上高", value: pl.revenue, kind:"plus",
-      detail: (stores && arpu) ? `${stores}店 × ¥${arpu}万 × ${(priceMultiplier||1).toFixed(2)}倍` : null },
-    { label:"売上原価", value: -pl.cogs, kind:"minus", detail:"売上高の25%" },
+      detail: (stores && arpu)
+        ? `${stores}店 × ¥${arpu}万 × ${effectiveMultiplier.toFixed(2)}倍${isDiminished ? `（値上げ${priceMultiplier.toFixed(1)}倍は鈍化）` : ""}`
+        : null },
+    { label:"売上原価", value: -pl.cogs, kind:"minus",
+      detail: (stores && pl.market?.cogsPerStore) ? `${stores}店 × ¥${pl.market.cogsPerStore}万/店` : null },
     { label:"売上総利益", value: null, kind:"subtotal" },
     ...allocDetail.map(d => ({
       label: `　${d.icon} ${d.name}投資`, value: -d.amount, kind:"minus", indent:true,
@@ -1990,7 +2123,7 @@ function PLTable({pl}) {
 // ============================================================
 // ONLINE LOBBY
 // ============================================================
-function OnlineLobby({ onSolo, onTutorial, room }) {
+function OnlineLobby({ onSolo, onTutorial, onHistory, room }) {
   const { roomCode, roomData, playerId, isHost, error, loading, allReady,
           createRoom, joinRoom, startGame, players } = room;
 
@@ -2055,6 +2188,9 @@ function OnlineLobby({ onSolo, onTutorial, room }) {
           </button>
           <button onClick={onTutorial} style={{background:"none",color:C.muted,border:"none",padding:"8px 0",fontSize:12,cursor:"pointer"}}>
             📖 チュートリアルを見る
+          </button>
+          <button onClick={onHistory} style={{background:"none",color:C.muted,border:"none",padding:"4px 0",fontSize:12,cursor:"pointer"}}>
+            📊 プレイ履歴を見る
           </button>
         </div>
       </div>
@@ -2203,6 +2339,132 @@ function OnlineLobby({ onSolo, onTutorial, room }) {
 // ============================================================
 // TUTORIAL SCREEN（5スライド）
 // ============================================================
+// ============================================================
+// PLAY HISTORY SCREEN：過去のプレイを振り返る
+// ============================================================
+function PlayHistoryScreen({ onBack }) {
+  const [records] = useState(() => loadPlayHistory());
+
+  if (records.length === 0) {
+    return (
+      <div style={bgBase}>
+        <div style={{maxWidth:500,margin:"0 auto",padding:"60px 24px",textAlign:"center"}}>
+          <button onClick={onBack} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:13,marginBottom:24}}>← 戻る</button>
+          <div style={{fontSize:40,marginBottom:12}}>📊</div>
+          <h2 style={{fontSize:18,fontWeight:800,color:C.text,marginBottom:8}}>まだプレイ履歴がありません</h2>
+          <p style={{fontSize:12,color:C.muted}}>ゲームを1回プレイすると、ここに結果が記録されます。</p>
+        </div>
+      </div>
+    );
+  }
+
+  // 傾向分析：直近プレイの投資配分平均から「偏り」を見つける
+  const ALLOC_LABELS = { sales:"営業", dev:"開発", marketing:"マーケ", cs:"CS" };
+  const avgAlloc = { sales:0, dev:0, marketing:0, cs:0 };
+  records.forEach(r => Object.keys(avgAlloc).forEach(k => { avgAlloc[k] += (r.allocRatios?.[k]||0); }));
+  Object.keys(avgAlloc).forEach(k => avgAlloc[k] = Math.round(avgAlloc[k] / records.length));
+  const dominant = Object.entries(avgAlloc).sort((a,b)=>b[1]-a[1])[0];
+
+  const avgRank = records.reduce((s,r)=>s+r.rank, 0) / records.length;
+  const winCount = records.filter(r => r.rank === 1).length;
+  const totalDevAttempts = records.reduce((s,r)=>s+(r.devFocusAttempts||0), 0);
+  const totalDevMatches = records.reduce((s,r)=>s+(r.devFocusMatches||0), 0);
+  const devMatchRate = totalDevAttempts > 0 ? Math.round(totalDevMatches/totalDevAttempts*100) : null;
+
+  const maxNetWorth = Math.max(...records.map(r=>r.netWorth), 1);
+
+  return (
+    <div style={bgBase}>
+      <div style={{maxWidth:560,margin:"0 auto",padding:"40px 20px 60px"}}>
+        <button onClick={onBack} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:13,marginBottom:20}}>← 戻る</button>
+        <div style={{textAlign:"center", marginBottom:24}}>
+          <div style={{fontSize:11, letterSpacing:4, color:C.purple, marginBottom:6}}>PLAY HISTORY</div>
+          <h2 style={{fontSize:22, fontWeight:900, color:C.text, margin:0}}>📊 プレイ履歴</h2>
+          <p style={{fontSize:11, color:C.muted, marginTop:4}}>直近{records.length}回のプレイを振り返る</p>
+        </div>
+
+        {/* 傾向まとめ */}
+        <Panel style={{marginBottom:16}}>
+          <Label style={{display:"block", marginBottom:10}}>あなたの傾向</Label>
+          <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:12}}>
+            <div style={{textAlign:"center"}}>
+              <div style={{fontSize:18, fontWeight:900, color:C.cyan, fontFamily:"'Courier New',monospace"}}>{avgRank.toFixed(1)}位</div>
+              <div style={{fontSize:9, color:C.muted}}>平均順位</div>
+            </div>
+            <div style={{textAlign:"center"}}>
+              <div style={{fontSize:18, fontWeight:900, color:C.yellow, fontFamily:"'Courier New',monospace"}}>{winCount}回</div>
+              <div style={{fontSize:9, color:C.muted}}>1位の回数</div>
+            </div>
+          </div>
+          <div style={{fontSize:11, color:C.text, marginBottom:8}}>
+            投資配分の平均：
+            {Object.entries(avgAlloc).map(([k,v]) => (
+              <span key={k} style={{marginLeft:8, color: k===dominant[0] ? C.purple : C.muted, fontWeight: k===dominant[0] ? 700 : 400}}>
+                {ALLOC_LABELS[k]}{v}%
+              </span>
+            ))}
+          </div>
+          {dominant[1] >= 40 && (
+            <div style={{fontSize:11, color:C.orange, background:`${C.orange}12`, padding:"8px 10px", borderRadius:6}}>
+              💡 あなたは「{ALLOC_LABELS[dominant[0]]}」に偏りがちです（平均{dominant[1]}%）。他の投資先も試してみると新しい戦略が見つかるかもしれません。
+            </div>
+          )}
+          {devMatchRate !== null && (
+            <div style={{fontSize:11, color:C.muted, marginTop:8}}>
+              🎯 プロダクト開発の市場ニーズ的中率：<span style={{color: devMatchRate>=50?C.green:C.orange, fontWeight:700}}>{devMatchRate}%</span>
+              （{totalDevMatches}/{totalDevAttempts}回）
+            </div>
+          )}
+        </Panel>
+
+        {/* 純資産の推移（プレイ間） */}
+        <Panel style={{marginBottom:16}}>
+          <Label style={{display:"block", marginBottom:10}}>純資産の推移（古い→新しい）</Label>
+          <div style={{display:"flex", alignItems:"flex-end", gap:4, height:70}}>
+            {[...records].reverse().map((r, i) => (
+              <div key={i} style={{flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:3}}>
+                <div style={{
+                  width:"100%", borderRadius:"3px 3px 0 0",
+                  background: r.rank===1 ? C.yellow : C.cyan,
+                  height:`${Math.max(4, r.netWorth/maxNetWorth*60)}px`,
+                  opacity: r.rank===1 ? 1 : 0.7,
+                }}/>
+                <span style={{fontSize:8, color:C.muted}}>{r.rank}位</span>
+              </div>
+            ))}
+          </div>
+        </Panel>
+
+        {/* 個別の履歴一覧 */}
+        <Panel>
+          <Label style={{display:"block", marginBottom:10}}>履歴一覧</Label>
+          {records.map((r, i) => {
+            const date = new Date(r.playedAt);
+            const dateStr = `${date.getMonth()+1}/${date.getDate()} ${date.getHours()}:${String(date.getMinutes()).padStart(2,"0")}`;
+            const marketName = MARKETS[r.marketId]?.name || r.marketId;
+            return (
+              <div key={i} style={{
+                display:"flex", alignItems:"center", gap:10, padding:"10px 0",
+                borderBottom: i<records.length-1 ? `1px solid ${C.border}` : "none",
+              }}>
+                <span style={{fontSize:18}}>{r.rank===1?"🥇":r.rank===2?"🥈":r.rank===3?"🥉":"　"}</span>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:11, fontWeight:700, color:C.text}}>{marketName} / {PLAYER_TYPES[r.playerType]?.name||r.playerType}</div>
+                  <div style={{fontSize:9, color:C.muted}}>{dateStr}　借入{r.borrowCount||0}回　価格変更{r.priceChangeCount||0}回</div>
+                </div>
+                <div style={{textAlign:"right"}}>
+                  <div style={{fontSize:13, fontWeight:900, color:C.cyan, fontFamily:"'Courier New',monospace"}}>¥{r.netWorth.toLocaleString()}万</div>
+                  <div style={{fontSize:9, color:C.muted}}>{r.stores}店</div>
+                </div>
+              </div>
+            );
+          })}
+        </Panel>
+      </div>
+    </div>
+  );
+}
+
 function TutorialScreen({ onComplete }) {
   const [slide, setSlide] = useState(0);
   const total = 5;
@@ -2498,14 +2760,17 @@ function PriceSettingScreen({ pendingPrice, onConfirm }) {
           <Label style={{display:"block",marginBottom:8}}>新しい価格（万円/月）</Label>
           <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
             <span style={{fontSize:16,color:C.muted,flexShrink:0}}>¥</span>
-            <input type="number" value={inputPrice} min={1}
+            <input type="number" value={inputPrice} min={1} max={baseArpu*5}
               inputMode="numeric" pattern="[0-9]*"
-              onChange={e => setInputPrice(Math.max(1, Number(e.target.value)))}
+              onChange={e => setInputPrice(Math.max(1, Math.min(baseArpu*5, Number(e.target.value))))}
               style={{flex:1,background:C.bg,border:`2px solid ${C.cyan}`,borderRadius:8,
                 padding:"12px 16px",color:C.text,fontSize:24,fontWeight:900,
                 fontFamily:"'Courier New',monospace",outline:"none",textAlign:"right"}}
             />
             <span style={{fontSize:14,color:C.muted,flexShrink:0}}>万円/月</span>
+          </div>
+          <div style={{fontSize:10,color:C.muted,marginTop:-8,marginBottom:14}}>
+            ¥1万 〜 ¥{baseArpu*5}万（標準価格の5倍まで）
           </div>
 
           {/* プリセット */}
@@ -2756,8 +3021,17 @@ export default function App() {
   const [permanentOpexExtra,setPermanentOpexExtra] = useState(0);
   const [pendingPrice,setPendingPrice]     = useState(null); // 年次価格設定待ち
   const [bsAnimReady,setBsAnimReady]       = useState(false); // BSアニメーション開始フラグ
+  const [marketNeed,setMarketNeed]         = useState(null); // ★ 市場の顧客ニーズ（全社共通、非公開）
+  const [truceProposals,setTruceProposals] = useState([]); // ★ ③今Q提案した不戦条約の相手ID一覧
+  const hasSavedRecordRef = useRef(false); // ★ gameover到達時の保存が複数回走らないようにするフラグ
   const [tab,setTab]             = useState("budget");
   const [history,setHistory]     = useState([]);
+  const [playStats,setPlayStats] = useState({
+    allocTotals: {sales:0, dev:0, marketing:0, cs:0}, // 累積投資配分（傾向分析用）
+    devFocusAttempts: 0, devFocusMatches: 0,          // ②devFocus的中率
+    priceChangeCount: 0,                              // 価格変更回数
+    borrowCount: 0,                                   // 借入回数
+  });
 
 
   // ============================================================
@@ -2858,13 +3132,26 @@ export default function App() {
 
     const playerEntries = Object.entries(players);
     const gameStates = room.roomData.gameState;
+    // ★ 市場ニーズ（全プレイヤー共通、Firebase経由で同期）。次Qに向けて1回だけ更新する
+    const currentMarketNeed = room.roomData.marketNeed || DEV_FOCUS_KEYS[0];
+    const nextMarketNeed = evolveMarketNeed(currentMarketNeed);
 
-    // 競争計算
-    const allPlayerOps = playerEntries.map(([pid, p]) => ({
-      id: pid,
-      ops: gameStates[pid]?.ops || {},
-    }));
-    const competResults = resolveMarket(allPlayerOps, market, room.roomData.quarter || 1);
+    // ★ ③外交：合意成立(accepted)した不戦条約のみtruceMapに反映（双方向）
+    const truceMap = {};
+    Object.values(room.roomData.truceProposals || {}).forEach(p => {
+      if (p.status !== "accepted") return;
+      truceMap[p.from] = [...(truceMap[p.from]||[]), p.to];
+      truceMap[p.to] = [...(truceMap[p.to]||[]), p.from];
+    });
+
+    // 競争計算（★ gameStateが存在しないプレイヤーは除外し、不正なops={}がresolveMarketに混入するのを防ぐ）
+    const allPlayerOps = playerEntries
+      .filter(([pid]) => gameStates[pid]?.ops)
+      .map(([pid]) => ({
+        id: pid,
+        ops: gameStates[pid].ops,
+      }));
+    const competResults = resolveMarket(allPlayerOps, market, room.roomData.quarter || 1, 0, truceMap);
 
     // 各プレイヤーのQ処理
     const newGameState = {};
@@ -2880,13 +3167,14 @@ export default function App() {
       const baseOpex = pt?.baseOpex || 100;
 
       // ★ Stage1: 時間差反映（前Qのpendingをcommit→今Qの配分をpendingへ積む）
-      let pOps = commitPendingInvestment(pState.ops, eff);
+      // ★ devFocusのマッチング判定もFirebase経由の市場ニーズで正しく機能する
+      let pOps = commitPendingInvestment(pState.ops, eff, currentMarketNeed);
       pOps = queuePendingInvestment(pOps, alloc, eff);
       let pBs = {...pState.bs};
       let sgaAdd = 0, capitalizeAmt = 0;
 
-      // 特別アクション
-      if (special && SPECIAL_ACTIONS[special] && !pState.usedSpecials?.includes(special)) {
+      // 特別アクション（★ oneTimeチェックを追加し、ソロモードと同じロジックに統一）
+      if (special && SPECIAL_ACTIONS[special] && (!SPECIAL_ACTIONS[special]?.oneTime || !pState.usedSpecials?.includes(special))) {
         const r = applySpecialAction(pBs, pOps, special, pState.usedSpecials || []);
         pBs = r.bs; pOps = r.ops; sgaAdd = r.sgaAdd || 0; capitalizeAmt = r.capitalizeAmt || 0;
       }
@@ -2915,7 +3203,7 @@ export default function App() {
       pBs.softwareAsset += allocCap;
 
       const revenue = calcRevenue(finalOps, market);
-      const cogs = Math.floor(revenue * 0.25);
+      const cogs = calcCogs(finalOps, market);
       const varCost = calcVarCost(finalOps, market);
       // ★ 営業力強化＝人員増強と解釈。ソロモードと統一
       const salesOpexAddon = calcSalesOpexAddon(finalOps.salesPower);
@@ -2940,6 +3228,14 @@ export default function App() {
         permanentOpexExtra: pState.permanentOpexExtra || 0,
       };
 
+      // ★ ③外交：このプレイヤーが関わった不戦条約の結果のみ抽出（pid視点でキー=相手id）
+      const myTruceResults = {};
+      Object.values(room.roomData.truceProposals || {}).forEach(p => {
+        if (p.status === "pending") return;
+        if (p.from === pid) myTruceResults[p.to] = p.status === "accepted";
+        else if (p.to === pid) myTruceResults[p.from] = p.status === "accepted";
+      });
+
       const pl = {
         revenue, cogs, grossProfit: revenue-cogs, varCost,
         allocSga, allocCap, sgaAdd, opex: totalBaseOpex, baseOpexCore: baseOpex, salesOpexAddon, totalSga,
@@ -2953,8 +3249,9 @@ export default function App() {
           finalStores: cr.finalStores,
         },
         playerAlloc: alloc, playerSpecial: special,
-        market: { arpu: market.arpu, varCostPerStore: market.varCostPerStore },
+        market: { arpu: market.arpu, varCostPerStore: market.varCostPerStore, cogsPerStore: market.cogsPerStore },
         priceMultiplier: finalOps.priceMultiplier,
+        truceResults: myTruceResults,
       };
       quarterLogs[pid] = { pl, event: null, narratives: [] };
     });
@@ -2964,7 +3261,7 @@ export default function App() {
                      : nextQ > MAX_QUARTERS ? "gameover"
                      : "result";
 
-    room.writeQuarterResult(nextQ, newGameState, quarterLogs, nextStatus);
+    room.writeQuarterResult(nextQ, newGameState, quarterLogs, nextStatus, nextMarketNeed);
   }, [room.roomData, onlineMode]);
 
   // オンライン：配分提出
@@ -3012,8 +3309,10 @@ export default function App() {
   const shortfall = Math.max(0, effectiveTarget - selfFundCapacity);
   // 実際に配分に使える額（自己資金上限とtargetの小さい方）
   const availableBudget = Math.min(effectiveTarget, selfFundCapacity);
-  const allocTotal = Object.values(allocation).reduce((s,v)=>s+v,0);
-  const canExecute = allocTotal <= availableBudget;
+  const allocTotal = BUDGET_ITEMS.reduce((s,item)=>s+(allocation[item.id]||0),0);
+  // ★ devに配分があるのにdevFocus未選択なら実行不可（顧客価値の方向性を必ず選ばせる）
+  const devFocusMissing = (allocation.dev||0) > 0 && !allocation.devFocus;
+  const canExecute = allocTotal <= availableBudget && !devFocusMissing;
 
   // Stage3: 借入を実行する
   function doBorrow(amount) {
@@ -3023,6 +3322,7 @@ export default function App() {
     if (actualAmount <= 0) return;
     setBs(b => borrowMoney(b, actualAmount));
     setBorrowedThisQuarter(b => b + actualAmount); // ★ 今Q借入した分はinvestRatio制限を受けずに使える
+    setPlayStats(s => ({...s, borrowCount: s.borrowCount + 1})); // ★ プレイ履歴用
     setShowBorrowPanel(false);
   }
 
@@ -3042,9 +3342,24 @@ export default function App() {
       if (roll < cumProb) { ev = e; break; }
     }
 
-    const { pBs, finalPOps, pl, newNpcs, newUsedSpecials } =
+    const { pBs, finalPOps, pl, newNpcs, newUsedSpecials, nextMarketNeed } =
       processQuarter(bs, ops, allocation, specialAction,
-                     npcs, market, quarter, usedSpecials, playerType);
+                     npcs, market, quarter, usedSpecials, playerType, marketNeed, truceProposals);
+    setMarketNeed(nextMarketNeed);
+    setTruceProposals([]); // ★ 今Qの提案はリセット（次Qは再度提案が必要）
+
+    // ★ プレイ履歴用：投資配分の累積・devFocus的中率を記録
+    setPlayStats(s => {
+      const next = {...s, allocTotals: {...s.allocTotals}};
+      BUDGET_ITEMS.forEach(item => {
+        next.allocTotals[item.id] = (next.allocTotals[item.id]||0) + (allocation[item.id]||0);
+      });
+      if (finalPOps.lastDevFocusResult) {
+        next.devFocusAttempts = s.devFocusAttempts + 1;
+        next.devFocusMatches = s.devFocusMatches + (finalPOps.lastDevFocusResult.matched ? 1 : 0);
+      }
+      return next;
+    });
 
     // 継続効果の適用
     let finalBs = pBs, finalOps = finalPOps;
@@ -3268,6 +3583,10 @@ export default function App() {
       stores: Math.max(0, (o.stores||0) - churnStores),
     }));
     if (churnMessage) setNarratives([churnMessage]);
+    // ★ プレイ履歴用：初回設定は除き、年次の価格変更のみカウント
+    if (!pendingPrice?.isInitial && newPrice !== prevPrice) {
+      setPlayStats(s => ({...s, priceChangeCount: s.priceChangeCount + 1}));
+    }
 
     // ★ yearreview後はnextQuarterを使って確実にquarterをセット
     // （setQuarter(q=>q+1)の非同期による競合状態を回避）
@@ -3288,6 +3607,33 @@ export default function App() {
     ...npcs.map(n=>({...n,netWorth:equity(n.bs),totalAssets:totalAssets(n.bs),stores:Math.floor(n.ops.stores)||0}))
   ].sort((a,b)=>b.netWorth-a.netWorth) : [];
 
+  // ★ プレイ履歴の保存：gameover画面に到達した時点で1回だけ記録する
+  useEffect(() => {
+    if (screen !== "gameover" || onlineMode || hasSavedRecordRef.current) return;
+    if (!bs || allPlayers.length === 0) return;
+    hasSavedRecordRef.current = true;
+
+    const rank = allPlayers.findIndex(p => p.isPlayer) + 1;
+    const allocSum = Object.values(playStats.allocTotals).reduce((s,v)=>s+v, 0) || 1;
+    const allocRatios = {};
+    Object.entries(playStats.allocTotals).forEach(([k,v]) => { allocRatios[k] = Math.round(v/allocSum*100); });
+
+    savePlayRecord({
+      playedAt: Date.now(),
+      marketId, playerType,
+      netWorth: equity(bs),
+      stores: ops.stores || 0,
+      rank,
+      allocRatios, // 投資配分の傾向（%）
+      devFocusAttempts: playStats.devFocusAttempts,
+      devFocusMatches: playStats.devFocusMatches,
+      priceChangeCount: playStats.priceChangeCount,
+      borrowCount: playStats.borrowCount,
+      finalPrice: ops.setPrice || 0,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screen]);
+
   if (screen==="tutorial") return (
     <TutorialScreen onComplete={()=>{
       try { localStorage.setItem(TUTORIAL_KEY,"1"); } catch {}
@@ -3295,10 +3641,14 @@ export default function App() {
       setScreen("lobby");
     }}/>
   );
+  if (screen==="history") return (
+    <PlayHistoryScreen onBack={()=>setScreen("lobby")}/>
+  );
   if (screen==="lobby") return (
     <OnlineLobby
       room={room}
       onTutorial={()=>setScreen("tutorial")}
+      onHistory={()=>setScreen("history")}
       onSolo={(info) => {
         if (info && info.mode === "online") {
           // オンラインモード：ゲーム開始
@@ -3580,7 +3930,9 @@ export default function App() {
           <button onClick={()=>{
             setScreen("lobby");setMarketId(null);setPlayerType(null);setBs(null);setOps(null);
             setQuarter(1);setUsedSpecials([]);setHistory([]);setLastPL(null);setLastEvent(null);
-            setLastNetIncome(0);setPrevNpcOps({});setNarratives([]);setPrevOps(null);setInvestTarget(null);setBorrowedThisQuarter(0);
+            setLastNetIncome(0);setPrevNpcOps({});setNarratives([]);setPrevOps(null);setInvestTarget(null);setBorrowedThisQuarter(0);setMarketNeed(null);setTruceProposals([]);
+            hasSavedRecordRef.current = false;
+            setPlayStats({allocTotals:{sales:0,dev:0,marketing:0,cs:0}, devFocusAttempts:0, devFocusMatches:0, priceChangeCount:0, borrowCount:0});
             setAllocation({sales:0,dev:0,marketing:0,price:0,cs:0});
             setOnlineMode(false);setOnlineInfo(null);
             setPendingChoice(null);setPendingPrice(null);setActiveEffects([]);setPermanentOpexExtra(0);
@@ -3643,25 +3995,73 @@ export default function App() {
               label, color, diff: ops[key] - prevOps[key],
             })).filter(c => Math.abs(c.diff) >= 0.05);
 
-            if (changes.length === 0) return null;
+            if (changes.length === 0 && !ops.lastDevFocusResult) return null;
             return (
               <Panel style={{marginBottom:14}}>
                 <Label style={{display:"block",marginBottom:10}}>⏳ 前Qの投資が反映されました</Label>
-                <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
-                  {changes.map(c => (
-                    <span key={c.label} style={{
-                      fontSize:11, fontWeight:700,
-                      color: c.diff >= 0 ? c.color : C.red,
-                      background: `${c.diff >= 0 ? c.color : C.red}18`,
-                      padding:"4px 10px", borderRadius:20,
+                {changes.length > 0 && (
+                  <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
+                    {changes.map(c => (
+                      <span key={c.label} style={{
+                        fontSize:11, fontWeight:700,
+                        color: c.diff >= 0 ? c.color : C.red,
+                        background: `${c.diff >= 0 ? c.color : C.red}18`,
+                        padding:"4px 10px", borderRadius:20,
+                      }}>
+                        {c.label} {c.diff >= 0 ? "+" : ""}{c.diff.toFixed(1)}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {/* ★ devFocusの当たり/外れ判定（市場ニーズは事後にだけ開示） */}
+                {ops.lastDevFocusResult && (() => {
+                  const r = ops.lastDevFocusResult;
+                  const chosen = DEV_FOCUS_TYPES[r.focus];
+                  const actual = DEV_FOCUS_TYPES[r.marketNeed];
+                  return (
+                    <div style={{
+                      marginTop: changes.length > 0 ? 10 : 0, paddingTop: changes.length > 0 ? 10 : 0,
+                      borderTop: changes.length > 0 ? `1px dashed ${C.border}` : "none",
                     }}>
-                      {c.label} {c.diff >= 0 ? "+" : ""}{c.diff.toFixed(1)}
-                    </span>
-                  ))}
-                </div>
+                      <div style={{fontSize:11, fontWeight:700, color: r.matched ? C.green : C.orange, marginBottom:4}}>
+                        {r.matched ? "🎯 的中！市場ニーズと一致" : "💭 ミスマッチ：市場が求めていたのは別の価値だった"}
+                      </div>
+                      <div style={{fontSize:10, color:C.muted}}>
+                        選んだ方向性：{chosen?.icon} {chosen?.name}　/　市場の実際のニーズ：{actual?.icon} {actual?.name}
+                      </div>
+                      <div style={{fontSize:10, color: r.matched ? C.green : C.orange, marginTop:2}}>
+                        効果は通常の{r.matched ? "1.3倍" : "0.8倍"}でした
+                      </div>
+                    </div>
+                  );
+                })()}
               </Panel>
             );
           })()}
+
+          {/* ①.5 外交：不戦条約の結果 */}
+          {lastPL.truceResults && Object.keys(lastPL.truceResults).length > 0 && (
+            <Panel style={{marginBottom:14}}>
+              <Label style={{display:"block",marginBottom:8}}>🤝 不戦条約の結果</Label>
+              <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
+                {Object.entries(lastPL.truceResults).map(([rivalId, accepted]) => {
+                  const npc = npcs.find(n => n.id === rivalId);
+                  const onlinePlayer = onlineMode ? (room.players||[]).find(p => p.id === rivalId) : null;
+                  const displayName = npc?.name || onlinePlayer?.name || rivalId;
+                  return (
+                    <span key={rivalId} style={{
+                      fontSize:11, fontWeight:700,
+                      color: accepted ? C.green : C.red,
+                      background: `${accepted ? C.green : C.red}18`,
+                      padding:"4px 10px", borderRadius:20,
+                    }}>
+                      {displayName}：{accepted ? "✅ 合意成立" : "❌ 拒否された"}
+                    </span>
+                  );
+                })}
+              </div>
+            </Panel>
+          )}
 
           {/* ② 過程：競争ナラティブ */}
           {narratives.length > 0 && (
@@ -3701,22 +4101,26 @@ export default function App() {
             />
           </Panel>
 
-          {/* ③ 結果：競争スコア差の警告（次Qへの予兆） */}
+          {/* ③ 結果：店舗数トレンドからの観測ベース警告（内部スコアは見せない） */}
           {(() => {
-            const myScore = competitiveScore(ops, market?.arpu);
-            const threats = npcs.filter(n => competitiveScore(n.ops, market?.arpu) > myScore + 5);
+            // ★ 競合の内部パラメータ・スコアは非公開。観測可能な「店舗数の伸び」だけで警戒を促す。
+            const threats = npcs.filter(n => {
+              const prev = prevNpcOps[n.id];
+              if (!prev) return false;
+              const growthRate = prev.stores > 0 ? (n.ops.stores - prev.stores) / prev.stores : 0;
+              return growthRate > 0.15; // 15%以上の急成長を観測したら警戒
+            });
             if (threats.length === 0) return null;
             return (
               <div style={{background:"#F8514912",border:"1px solid #F8514944",borderRadius:8,padding:"10px 14px",marginBottom:14}}>
-                <div style={{fontSize:12,fontWeight:700,color:"#F85149",marginBottom:6}}>⚠️ スコア劣位 — 来Q以降の流出リスク</div>
+                <div style={{fontSize:12,fontWeight:700,color:"#F85149",marginBottom:6}}>⚠️ 競合の急成長を観測</div>
                 {threats.map(n => {
-                  const diff = competitiveScore(n.ops, market?.arpu) - myScore;
-                  const lossRate = Math.min(20, Math.floor(diff * 0.25 * getPhase(quarter).stealMultiplier));
+                  const prev = prevNpcOps[n.id];
+                  const growthPct = prev.stores > 0 ? Math.round((n.ops.stores - prev.stores) / prev.stores * 100) : 0;
                   return (
                     <div key={n.id} style={{fontSize:11,color:"#8B949E",marginTop:3}}>
                       <span style={{color:n.color,fontWeight:700}}>{n.name}</span>
-                      {" "}にスコアで{diff.toFixed(1)}差をつけられている。
-                      現在{ops.stores}店なら来Q約<span style={{color:"#F85149",fontWeight:700}}>{Math.floor(ops.stores*lossRate/100)}店</span>の流出予測。
+                      {" "}が前Qから店舗数+{growthPct}%。何を強化したのかは不明だが、警戒が必要かもしれない。
                     </div>
                   );
                 })}
@@ -3729,18 +4133,15 @@ export default function App() {
 
           {bsAnimReady && <BSBuildAnimation bs={bs} quarter={quarter}/>}
 
-          {/* ⑤ 将来予測：競合の動向 */}
+          {/* ⑤ 将来予測：競合の動向（観測可能な情報のみ） */}
           <Panel style={{marginTop:14}}>
             <Label style={{display:"block",marginBottom:10}}>競合の動向</Label>
             {npcs.map(n => {
-              const nScore = competitiveScore(n.ops, market?.arpu);
-              const myScore = competitiveScore(ops, market?.arpu);
-              const scoreDiff = nScore - myScore;
               return (
                 <div key={n.id} style={{
                   padding:"10px 0", borderBottom:`1px solid ${C.border}`,
                   background: scoreDiff > 10 ? "#F8514908" : "transparent",
-                  borderRadius: scoreDiff > 10 ? 6 : 0,
+                  borderRadius: 0,
                 }}>
                   <div style={{display:"flex",gap:12,alignItems:"center"}}>
                     <span style={{fontSize:20}}>{n.icon}</span>
@@ -3749,34 +4150,25 @@ export default function App() {
                         <span style={{fontSize:13,fontWeight:700,color:n.color}}>{n.name}</span>
                         {n.lastSpecial && (
                           <span style={{fontSize:10,background:`${C.cyan}22`,color:C.cyan,padding:"1px 8px",borderRadius:20}}>
-                            ⚡{SPECIAL_ACTIONS[n.lastSpecial]?.name}
-                          </span>
-                        )}
-                        {scoreDiff > 10 && (
-                          <span style={{fontSize:10,background:"#F8514922",color:"#F85149",padding:"1px 8px",borderRadius:20}}>
-                            ⚠️ スコア差+{scoreDiff.toFixed(0)}
+                            ⚡ 何らかの特別アクションを実施
                           </span>
                         )}
                       </div>
-                      {/* パラメータ変化ハイライト */}
+                      {/* ★ 観測可能な情報のみ：店舗数の増減（内部パラメータは非公開） */}
                       {prevNpcOps[n.id] && (() => {
                         const prev = prevNpcOps[n.id];
-                        const changes = [
-                          ["品質", n.ops.solutionQuality - prev.solutionQuality, C.purple],
-                          ["営業", n.ops.salesPower - prev.salesPower, C.cyan],
-                          ["ブランド", n.ops.brandAwareness - prev.brandAwareness, C.yellow],
-                          
-                          ["CS", n.ops.supportQuality - prev.supportQuality, C.orange],
-                        ].filter(([,v]) => Math.abs(v) >= 0.5);
-                        return changes.length > 0 ? (
-                          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-                            {changes.map(([l,v,c]) => (
-                              <span key={l} style={{fontSize:10,color:v>0?c:"#F85149",background:`${v>0?c:"#F85149"}18`,padding:"1px 7px",borderRadius:20}}>
-                                {l} {v>0?"+":""}{v.toFixed(1)}
-                              </span>
-                            ))}
-                          </div>
-                        ) : null;
+                        const storeDiff = (n.ops.stores||0) - (prev.stores||0);
+                        if (Math.abs(storeDiff) < 1) return null;
+                        return (
+                          <span style={{
+                            fontSize:10, fontWeight:700,
+                            color: storeDiff > 0 ? C.green : C.red,
+                            background: `${storeDiff > 0 ? C.green : C.red}18`,
+                            padding:"1px 8px", borderRadius:20,
+                          }}>
+                            店舗数 {storeDiff>0?"+":""}{storeDiff}
+                          </span>
+                        );
                       })()}
                     </div>
                     <div style={{textAlign:"right"}}>
@@ -3784,24 +4176,22 @@ export default function App() {
                         ¥{equity(n.bs).toLocaleString()}万
                       </div>
                       <div style={{fontSize:10,color:C.muted}}>
-                        {n.ops.stores}店 / score:{nScore.toFixed(0)}
-                        {scoreDiff >= 0 ? <span style={{color:"#F85149"}}> (+{scoreDiff.toFixed(0)})</span>
-                                        : <span style={{color:"#3FB950"}}> ({scoreDiff.toFixed(0)})</span>}
+                        {n.ops.stores}店
                       </div>
                     </div>
                   </div>
-                  {/* スコア比較バー：自分 vs このNPC */}
+                  {/* ★ シェア比較バー：内部スコアではなく店舗数（観測可能）で表示 */}
                   <div style={{marginTop:8, display:"flex", alignItems:"center", gap:6}}>
                     <span style={{fontSize:9, color:C.cyan, width:20, flexShrink:0}}>You</span>
                     <div style={{flex:1, height:6, background:C.border, borderRadius:3, overflow:"hidden", display:"flex"}}>
                       <div className="sb-bar-fill" style={{
                         height:"100%",
-                        width: `${(myScore/(myScore+nScore))*100}%`,
+                        width: `${(ops.stores/(Math.max(1,ops.stores+n.ops.stores)))*100}%`,
                         background: C.cyan, borderRadius:"3px 0 0 3px",
                       }}/>
                       <div className="sb-bar-fill" style={{
                         height:"100%",
-                        width: `${(nScore/(myScore+nScore))*100}%`,
+                        width: `${(n.ops.stores/(Math.max(1,ops.stores+n.ops.stores)))*100}%`,
                         background: n.color, borderRadius:"0 3px 3px 0",
                       }}/>
                     </div>
@@ -3810,6 +4200,9 @@ export default function App() {
                 </div>
               );
             })}
+            <div style={{marginTop:10, fontSize:9, color:C.muted, textAlign:"center"}}>
+              ※ 競合の内部パラメータ・投資内容は非公開。観測できるのは店舗数と資産規模のみ。
+            </div>
           </Panel>
 
           {/* ⑥ 振り返り：今期の予算配分 */}
@@ -3911,7 +4304,7 @@ export default function App() {
 
         {/* Tabs */}
         <div style={{display:"flex",gap:4,marginBottom:14,background:C.panel,borderRadius:10,padding:4}}>
-          {[["budget","💰 予算配分"],["special","⚡ 特別アクション"],["bs","🏦 BS/財務"],["ops","📊 競争力"],["rank","🏆 順位"]].map(([id,label])=>(
+          {[["budget","💰 予算配分"],["diplomacy","🤝 外交"],["special","⚡ 特別アクション"],["bs","🏦 BS/財務"],["ops","📊 競争力"],["rank","🏆 順位"]].map(([id,label])=>(
             <button key={id} onClick={()=>setTab(id)} style={{flex:1,background:tab===id?`linear-gradient(135deg,#006080,${C.cyan})`:"transparent",color:tab===id?"#fff":C.muted,border:"none",borderRadius:8,padding:"8px 4px",fontSize:11,fontWeight:600,cursor:"pointer",transition:"all 0.18s"}}>
               {label}
             </button>
@@ -4035,6 +4428,7 @@ export default function App() {
               <Panel style={{flex:1,padding:"10px 14px"}}>
                 <div style={{fontSize:11,color:C.muted}}>予算消費: <span style={{color:C.yellow,fontWeight:700}}>¥{allocTotal}万</span> / ¥{availableBudget}万</div>
                 {allocTotal>availableBudget&&<div style={{fontSize:11,color:C.red,marginTop:2}}>⚠️ 予算超過</div>}
+                {devFocusMissing&&<div style={{fontSize:11,color:C.red,marginTop:2}}>⚠️ プロダクト開発の方向性を選んでください</div>}
               </Panel>
               <button
                 onClick={onlineMode ? onlineSubmitAllocation : executeQuarter}
@@ -4047,6 +4441,107 @@ export default function App() {
               </button>
             </div>
           </>
+        )}
+
+        {/* DIPLOMACY TAB：①不戦条約の提案 */}
+        {tab==="diplomacy" && (
+          <Panel style={{marginBottom:14}}>
+            <Label style={{display:"block",marginBottom:8}}>🤝 不戦条約</Label>
+            <div style={{fontSize:11,color:C.muted,marginBottom:14,lineHeight:1.6}}>
+              提案した相手と合意できれば、今期はお互いに奪取・解約流出が発生しません。
+              相手が受けるかどうかは分かりません（劣勢な相手ほど受けやすい傾向があります）。
+            </div>
+            {onlineMode ? (() => {
+              const otherPlayers = (room.players || []).filter(p => p.id !== room.playerId);
+              const proposals = room.roomData?.truceProposals || {};
+              return (
+                <div style={{display:"grid",gap:10}}>
+                  {otherPlayers.length === 0 && (
+                    <div style={{fontSize:11,color:C.muted,textAlign:"center",padding:"20px 0"}}>対戦相手がいません</div>
+                  )}
+                  {otherPlayers.map(p => {
+                    const key = [room.playerId, p.id].sort().join("_");
+                    const proposal = proposals[key];
+                    const iSentIt = proposal?.from === room.playerId;
+                    const theyAskedMe = proposal?.from === p.id && proposal?.status === "pending";
+                    return (
+                      <div key={p.id} style={{
+                        background:C.bg,borderRadius:10,padding:"10px 14px",
+                        border:`1px solid ${proposal?.status==="accepted"?C.green:C.border}`,
+                      }}>
+                        <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:theyAskedMe?8:0}}>
+                          <span style={{fontSize:20}}>👤</span>
+                          <div style={{flex:1}}>
+                            <div style={{fontSize:13,fontWeight:700,color:C.text}}>{p.name}</div>
+                            {proposal && (
+                              <div style={{fontSize:9,color: proposal.status==="accepted"?C.green : proposal.status==="declined"?C.red : C.yellow}}>
+                                {proposal.status==="accepted" ? "✅ 合意成立" :
+                                 proposal.status==="declined" ? "❌ 拒否されました" :
+                                 iSentIt ? "⏳ 相手の応答待ち" : "🔔 不戦を提案されています"}
+                              </div>
+                            )}
+                          </div>
+                          {!proposal && (
+                            <button onClick={() => room.proposeTruce(p.id)} style={{
+                              padding:"8px 16px",borderRadius:8,border:`1.5px solid ${C.border}`,
+                              background:C.panel,color:C.muted,fontSize:11,fontWeight:700,cursor:"pointer",
+                            }}>
+                              不戦を提案
+                            </button>
+                          )}
+                        </div>
+                        {theyAskedMe && (
+                          <div style={{display:"flex",gap:8}}>
+                            <button onClick={() => room.respondTruce(p.id, true)} style={{
+                              flex:1,padding:"7px 0",borderRadius:8,border:"none",
+                              background:`${C.green}22`,color:C.green,fontSize:11,fontWeight:700,cursor:"pointer",
+                            }}>
+                              合意する
+                            </button>
+                            <button onClick={() => room.respondTruce(p.id, false)} style={{
+                              flex:1,padding:"7px 0",borderRadius:8,border:"none",
+                              background:`${C.red}22`,color:C.red,fontSize:11,fontWeight:700,cursor:"pointer",
+                            }}>
+                              拒否する
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })() : (
+              <div style={{display:"grid",gap:10}}>
+                {npcs.map(n => {
+                  const proposed = truceProposals.includes(n.id);
+                  return (
+                    <div key={n.id} style={{
+                      display:"flex",alignItems:"center",gap:12,
+                      background:C.bg,borderRadius:10,padding:"10px 14px",
+                      border:`1px solid ${proposed?C.cyan:C.border}`,
+                    }}>
+                      <span style={{fontSize:20}}>{n.icon}</span>
+                      <div style={{flex:1}}>
+                        <div style={{fontSize:13,fontWeight:700,color:n.color}}>{n.name}</div>
+                        <div style={{fontSize:9,color:C.muted}}>{n.ops.stores}店</div>
+                      </div>
+                      <button
+                        onClick={() => setTruceProposals(p => proposed ? p.filter(id=>id!==n.id) : [...p, n.id])}
+                        style={{
+                          padding:"8px 16px",borderRadius:8,border:`1.5px solid ${proposed?C.cyan:C.border}`,
+                          background: proposed ? `${C.cyan}18` : C.panel,
+                          color: proposed ? C.cyan : C.muted,
+                          fontSize:11,fontWeight:700,cursor:"pointer",
+                        }}>
+                        {proposed ? "提案中 ✓" : "不戦を提案"}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </Panel>
         )}
 
         {/* SPECIAL ACTION TAB */}
@@ -4138,7 +4633,7 @@ export default function App() {
         {tab==="ops" && (
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
             <Panel>
-              <Label style={{display:"block",marginBottom:12}}>競争力パラメータ（vs 競合）</Label>
+              <Label style={{display:"block",marginBottom:12}}>競争力パラメータ（自分のみ）</Label>
               {Object.values(allocation||{}).some(v=>v>0) && (
                 <div style={{marginBottom:10,padding:"6px 10px",background:`${C.purple}10`,border:`1px solid ${C.purple}33`,borderRadius:6,fontSize:10,color:C.purple}}>
                   ⏳ 今Q投資中の分は来Qから反映されます
@@ -4152,35 +4647,28 @@ export default function App() {
                 <div key={k} style={{marginBottom:12}}>
                   <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
                     <span style={{fontSize:11,color:C.muted}}>{l}</span>
-                    <div style={{display:"flex",gap:8,fontSize:11}}>
-                      <span style={{color:c,fontWeight:800}}>{Number(ops[k]).toFixed(1)}</span>
-                      {npcs.map(n=>(
-                        <span key={n.id} style={{color:n.color}}>{Number(n.ops[k]).toFixed(1)}</span>
-                      ))}
-                    </div>
+                    <span style={{fontSize:11,color:c,fontWeight:800}}>{Number(ops[k]).toFixed(1)}</span>
                   </div>
                   <div style={{position:"relative",height:6}}>
                     <Bar value={ops[k]} color={c} max={PARAM_MAX}/>
-                    {npcs.map((n,i)=>(
-                      <div key={n.id} style={{position:"absolute",top:0,left:`${Math.min(100,n.ops[k]/PARAM_MAX*100)}%`,width:2,height:6,background:n.color,borderRadius:1}}/>
-                    ))}
                   </div>
                 </div>
               ))}
-              <div style={{marginTop:8,fontSize:10,color:C.muted}}>縦線 = 競合のスコア位置</div>
+              <div style={{marginTop:8,fontSize:10,color:C.muted}}>※ 競合の内部パラメータは非公開。店舗数・資産規模からのみ動向を推測できる。</div>
             </Panel>
             <div>
               <Panel style={{marginBottom:12}}>
-                <Label style={{display:"block",marginBottom:10}}>競争力スコア比較</Label>
-                {[{name:"あなた",score:competitiveScore(ops, market?.arpu),color:C.cyan,isPlayer:true},...npcs.map(n=>({name:n.name,score:competitiveScore(n.ops, market?.arpu),color:n.color}))].map(p=>(
-                  <div key={p.name} style={{marginBottom:10}}>
-                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
-                      <span style={{fontSize:11,color:p.isPlayer?C.cyan:p.color,fontWeight:p.isPlayer?700:400}}>{p.name}</span>
-                      <span style={{fontSize:12,fontWeight:800,color:p.color,fontFamily:"'Courier New',monospace"}}>{p.score.toFixed(1)}</span>
-                    </div>
-                    <Bar value={p.score} color={p.color} max={150}/>
+                <Label style={{display:"block",marginBottom:10}}>競争力スコア（自分のみ）</Label>
+                <div style={{marginBottom:10}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+                    <span style={{fontSize:11,color:C.cyan,fontWeight:700}}>あなた</span>
+                    <span style={{fontSize:12,fontWeight:800,color:C.cyan,fontFamily:"'Courier New',monospace"}}>{competitiveScore(ops, market?.arpu).toFixed(1)}</span>
                   </div>
-                ))}
+                  <Bar value={competitiveScore(ops, market?.arpu)} color={C.cyan} max={150}/>
+                </div>
+                <div style={{fontSize:9,color:C.muted,marginTop:8}}>
+                  ※ 競合のスコアは非公開。店舗数・資産の変化からのみ推測できる。
+                </div>
               </Panel>
               <Panel>
                 <Label style={{display:"block",marginBottom:10}}>経営指標</Label>
