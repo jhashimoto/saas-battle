@@ -501,9 +501,13 @@ function applyBudgetAllocation(ops, allocation, investEfficiency = 1.0) {
 }
 
 // 特別アクション適用
-function applySpecialAction(bs, ops, actionId, usedActions) {
+function applySpecialAction(bs, ops, actionId, usedActions, playerType) {
   const action = SPECIAL_ACTIONS[actionId];
   if (!action) return { bs, ops, sgaAdd: 0, capitalizeAmt: 0 };
+  // ★ 防御的チェック：startupOnlyアクションがUIのフィルタを迂回して呼ばれた場合に備える
+  if (action.startupOnly && playerType && playerType !== "startup") {
+    return { bs, ops, sgaAdd: 0, capitalizeAmt: 0 };
+  }
   let newBs = { ...bs }, newOps = { ...ops };
   let sgaAdd = 0, capitalizeAmt = 0;
 
@@ -686,7 +690,7 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
   let pBs = { ...playerBs };
   let sgaAdd = 0, capitalizeAmt = 0;
   if (playerSpecial && (!SPECIAL_ACTIONS[playerSpecial]?.oneTime || !usedSpecials.includes(playerSpecial))) {
-    const r = applySpecialAction(pBs, pOps, playerSpecial, usedSpecials);
+    const r = applySpecialAction(pBs, pOps, playerSpecial, usedSpecials, playerType);
     pBs = r.bs; pOps = r.ops; sgaAdd = r.sgaAdd; capitalizeAmt = r.capitalizeAmt;
   }
 
@@ -717,7 +721,7 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
     let nBs = {...n.bs};
     let nSgaAdd = 0; // ★ 特別アクションの費用分。PL計算に反映するため保持
     if (nSpecial) {
-      const r = applySpecialAction(nBs, nOps, nSpecial, nUsedSpecials);
+      const r = applySpecialAction(nBs, nOps, nSpecial, nUsedSpecials, n.type);
       nBs = r.bs; nOps = r.ops; nSgaAdd = r.sgaAdd || 0;
       // r.capitalizeAmtはapplySpecialAction内でnBs.softwareAssetに既に加算済みなのでここでは何もしない
     }
@@ -3175,7 +3179,7 @@ export default function App() {
 
       // 特別アクション（★ oneTimeチェックを追加し、ソロモードと同じロジックに統一）
       if (special && SPECIAL_ACTIONS[special] && (!SPECIAL_ACTIONS[special]?.oneTime || !pState.usedSpecials?.includes(special))) {
-        const r = applySpecialAction(pBs, pOps, special, pState.usedSpecials || []);
+        const r = applySpecialAction(pBs, pOps, special, pState.usedSpecials || [], p.playerType);
         pBs = r.bs; pOps = r.ops; sgaAdd = r.sgaAdd || 0; capitalizeAmt = r.capitalizeAmt || 0;
       }
 
@@ -3962,6 +3966,12 @@ export default function App() {
       />
     );
   }
+  // ★ フォールバック：battlefield画面に来たがmarketが取得できない等の異常時は、
+  //   画面が固まらないよう自動的にresultへ進める（Q1等での原因不明な表示崩れの保険）
+  if (screen === "battlefield" && lastPL && !market) {
+    setTimeout(() => setScreen("result"), 0);
+    return <div style={bgBase}/>;
+  }
 
   // QUARTER RESULT
   if (screen==="result" && lastPL) {
@@ -4140,8 +4150,6 @@ export default function App() {
               return (
                 <div key={n.id} style={{
                   padding:"10px 0", borderBottom:`1px solid ${C.border}`,
-                  background: scoreDiff > 10 ? "#F8514908" : "transparent",
-                  borderRadius: 0,
                 }}>
                   <div style={{display:"flex",gap:12,alignItems:"center"}}>
                     <span style={{fontSize:20}}>{n.icon}</span>

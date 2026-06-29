@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { db } from "./firebase.js";
 import { ref, set, get, update, onValue, off, serverTimestamp } from "firebase/database";
 
-const GAME_VERSION = "5.6";
+const GAME_VERSION = "5.9";
 const STORAGE_KEY = `saas_battle_room_v${GAME_VERSION}`;
 const TUTORIAL_KEY = `saas_tutorial_done_v${GAME_VERSION}`;
 // ★ App.jsx側のDEV_FOCUS_TYPESと同じキー一覧（市場ニーズの初期化に使用。循環import回避のためここに複製）
