@@ -339,14 +339,21 @@ function calcChurn(ops, baseArpu) {
   ));
 }
 
+// ★ 値上げ時、価格に敏感な一部の顧客には旧価格のまま引き留め交渉が発生する、という想定。
+// 値上げ率が大きいほど交渉に応じる顧客の割合が増え（最大65%）、実質的な単価の伸びが鈍る。
+// 値下げ（倍率<=1）には交渉は発生しない（全顧客に新価格がそのまま適用される）。
+function calcNegotiatedRatio(priceMultiplier) {
+  if (priceMultiplier <= 1) return 0;
+  const hikeRatio = priceMultiplier - 1;
+  return Math.min(0.65, hikeRatio * 0.35);
+}
+
 function calcRevenue(ops, market) {
   // ARPUはpriceMultiplier（価格設定）で変動。solutionQualityはスコア経由のみ
   const priceMultiplier = ops.priceMultiplier || 1.0;
-  // ★ 値上げは収益に対数的な減衰カーブを適用（顧客が払える金額には実質的な上限があるため）。
-  // 値下げ（倍率<=1）は線形のまま。値上げ（倍率>1）は対数で鈍化させ、無制限の値上げ得を防ぐ。
-  const effectiveMultiplier = priceMultiplier <= 1
-    ? priceMultiplier
-    : 1 + Math.log(priceMultiplier);
+  const negotiatedRatio = calcNegotiatedRatio(priceMultiplier);
+  // 交渉に応じた顧客には旧価格(1.0倍)、残りの顧客には新価格(priceMultiplier)を適用した加重平均
+  const effectiveMultiplier = negotiatedRatio * 1.0 + (1 - negotiatedRatio) * priceMultiplier;
   return Math.floor(ops.stores * market.arpu * effectiveMultiplier);
 }
 
@@ -802,6 +809,7 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
     investEfficiency,
     market: { arpu: market.arpu, varCostPerStore: market.varCostPerStore, cogsPerStore: market.cogsPerStore }, // ★ PL詳細表示用
     priceMultiplier: finalPOps.priceMultiplier,
+    setPrice: finalPOps.setPrice,
     truceResults, // ★ ③不戦条約の合意/拒否結果
   };
 
@@ -1936,15 +1944,22 @@ function PLBuildAnimation({ pl, quarter, onComplete }) {
   const stores = pl.competResult?.finalStores || 0;
   const arpu = pl.market?.arpu;
   const priceMultiplier = pl.priceMultiplier || 1.0;
-  // ★ 値上げ時は対数減衰が効くため、表示上も「実効倍率」を見せる（設定倍率とズレることを明示）
-  const effectiveMultiplier = priceMultiplier <= 1 ? priceMultiplier : 1 + Math.log(priceMultiplier);
+  // ★ 値上げ時、価格に敏感な一部の顧客には旧価格のまま引き留め交渉が発生する想定。
+  // negotiatedRatio = 交渉に応じた（旧価格のままになった）顧客の割合
+  const negotiatedRatio = priceMultiplier <= 1 ? 0 : Math.min(0.65, (priceMultiplier - 1) * 0.35);
+  const effectiveMultiplier = negotiatedRatio * 1.0 + (1 - negotiatedRatio) * priceMultiplier;
+  const effectiveUnitPrice = arpu ? Math.round(arpu * effectiveMultiplier * 10) / 10 : null;
+  const setPrice = pl.setPrice ?? (arpu ? Math.round(arpu * priceMultiplier) : null);
   const isDiminished = priceMultiplier > 1;
+  const negotiatedStores = Math.round(stores * negotiatedRatio);
 
   // 表示する行（小計を都度計算）。detail: 補足説明（小さい文字で内訳を出す）
   const rows = [
     { label:"売上高", value: pl.revenue, kind:"plus",
-      detail: (stores && arpu)
-        ? `${stores}店 × ¥${arpu}万 × ${effectiveMultiplier.toFixed(2)}倍${isDiminished ? `（値上げ${priceMultiplier.toFixed(1)}倍は鈍化）` : ""}`
+      detail: (stores && effectiveUnitPrice)
+        ? (isDiminished
+            ? `${stores}店中、${negotiatedStores}店が価格交渉枠（旧価格のまま）→ 実質単価¥${effectiveUnitPrice}万（設定価格¥${setPrice}万）`
+            : `${stores}店 × ¥${effectiveUnitPrice}万` + (setPrice !== arpu ? `（設定価格¥${setPrice}万）` : ""))
         : null },
     { label:"売上原価", value: -pl.cogs, kind:"minus",
       detail: (stores && pl.market?.cogsPerStore) ? `${stores}店 × ¥${pl.market.cogsPerStore}万/店` : null },
@@ -3255,6 +3270,7 @@ export default function App() {
         playerAlloc: alloc, playerSpecial: special,
         market: { arpu: market.arpu, varCostPerStore: market.varCostPerStore, cogsPerStore: market.cogsPerStore },
         priceMultiplier: finalOps.priceMultiplier,
+        setPrice: finalOps.setPrice,
         truceResults: myTruceResults,
       };
       quarterLogs[pid] = { pl, event: null, narratives: [] };
