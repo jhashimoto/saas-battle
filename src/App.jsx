@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useRoom, GAME_VERSION, TUTORIAL_KEY, clearRoomStorage } from "./useRoom.js";
+import { lineProfile } from "./liff.js";
 
 // ============================================================
 // DESIGN PHILOSOPHY
@@ -2147,7 +2148,7 @@ function OnlineLobby({ onSolo, onTutorial, onHistory, room }) {
           createRoom, joinRoom, startGame, players } = room;
 
   const [mode, setMode]         = useState(null); // "create" | "join"
-  const [playerName, setName]   = useState("");
+  const [playerName, setName]   = useState(() => lineProfile?.displayName || "");
   const [joinCode, setJoinCode] = useState("");
   const [marketSel, setMarket]  = useState("food");
   const [typeSel, setType]      = useState("startup");

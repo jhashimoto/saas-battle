@@ -1,2 +1,6 @@
 node_modules/
 .DS_Store
+
+# ローカル専用の環境変数（チャネルシークレット等の秘匿情報はここにのみ置き、コミットしない）
+.env.local
+.env.*.local
