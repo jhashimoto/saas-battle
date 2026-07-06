@@ -364,6 +364,35 @@ function calcPriceMultiplier(setPrice, baseArpu) {
   return setPrice / baseArpu;
 }
 
+// ============================================================
+// ★ NPC価格戦略：年次のみ再判定（Q4→Q5、Q8→Q9のconfirmPriceから呼ばれる）
+// シェア劣勢による値下げ反応を、品質優位による強気設定より優先する
+// （品質が高くても、シェアを大きく失っている状況ではまず防衛を優先する、という想定）
+// ============================================================
+const NPC_PRICE_MULTIPLIER_RANGE = {
+  standard:         [1.00, 1.00],
+  price_aggressive: [0.70, 0.80],
+  price_premium:    [1.20, 1.30],
+};
+
+function decideNpcPriceStrategy(npc, playerStores, baseArpu) {
+  const shareRatio = playerStores > 0 ? (npc.ops.stores || 0) / playerStores : 1;
+  const isShareLow = shareRatio <= 0.5;
+  const isHighQuality = (npc.ops.solutionQuality || 0) >= 100;
+
+  let strategy = "standard";
+  if (isShareLow && Math.random() < 0.7) {
+    strategy = "price_aggressive";
+  } else if (isHighQuality && Math.random() < 0.6) {
+    strategy = "price_premium";
+  }
+
+  const [lo, hi] = NPC_PRICE_MULTIPLIER_RANGE[strategy];
+  const priceMultiplier = lo + Math.random() * (hi - lo);
+  const setPrice = Math.max(1, Math.round(baseArpu * priceMultiplier));
+  return { strategy, priceMultiplier, setPrice };
+}
+
 // ★ 原価（COGS）は店舗数ベースの固定単価。価格（ARPU設定）には依存しない。
 // サーバー費用・ライセンス費用など「1顧客に提供するコストの実額」のため、価格を変えても変わらない。
 function calcCogs(ops, market) {
@@ -3607,6 +3636,19 @@ export default function App() {
     // ★ プレイ履歴用：初回設定は除き、年次の価格変更のみカウント
     if (!pendingPrice?.isInitial && newPrice !== prevPrice) {
       setPlayStats(s => ({...s, priceChangeCount: s.priceChangeCount + 1}));
+    }
+
+    // ★ NPCの価格戦略も同じ年次タイミング（Q4→Q5、Q8→Q9）でのみ再判定する（初回は標準価格のまま）
+    if (!pendingPrice?.isInitial) {
+      const playerStores = ops.stores || 0;
+      setNpcs(ns => ns.map(n => {
+        const decision = decideNpcPriceStrategy(n, playerStores, baseArpu);
+        return {
+          ...n,
+          priceStrategy: decision.strategy,
+          ops: { ...n.ops, setPrice: decision.setPrice, priceMultiplier: decision.priceMultiplier },
+        };
+      }));
     }
 
     // ★ yearreview後はnextQuarterを使って確実にquarterをセット
