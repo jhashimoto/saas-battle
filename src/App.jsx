@@ -469,13 +469,33 @@ function calcLoanRepayment(bs) {
 // pendingInvestment に積んでおき、次Q開始時にcommitする。
 // ============================================================
 
+// ★ CS投資不足による解約連鎖：店舗数に対してCS予算が薄いと、投資していても
+// supportQualityが通常より速く劣化する（CSチームが顧客数の増加に追いつけない、という想定）。
+// 序盤（店舗数10未満）はこの追加劣化を適用しない（序盤から詰むのを防ぐため）。
+const CS_APPROPRIATE_PER_STORE = 2; // 1店あたり適正CS投資額（万円/Q）
+const CS_SHORTFALL_MIN_STORES = 10;
+
 // 前Qに積んだpendingInvestmentをパラメータへ反映する（今Q開始時に実行）
 function commitPendingInvestment(ops, investEfficiency = 1.0, currentMarketNeed = null) {
   const pending = ops.pendingInvestment || {};
   let newOps = { ...ops };
+  let csShortfall = null; // ★ result画面での警告表示用
   BUDGET_ITEMS.forEach(item => {
     if (item.immediate) return; // ★ 即時反映項目は既にqueuePendingInvestmentで処理済みなのでスキップ
     const invested = pending[item.id] || 0;
+
+    if (item.id === "cs" && (newOps.stores || 0) >= CS_SHORTFALL_MIN_STORES) {
+      const csAppropriate = newOps.stores * CS_APPROPRIATE_PER_STORE;
+      const csRatio = invested / csAppropriate;
+      if (csRatio < 1.0) {
+        const multiplier = csRatio < 0.5 ? 2.5 : 1.5;
+        const decayAmt = item.decay * multiplier;
+        newOps[item.param] = Math.max(0, newOps[item.param] - decayAmt);
+        csShortfall = { ratio: csRatio, multiplier, decayAmt };
+        return; // ★ 不足時は下のgain/decay分岐を通さない（このアイテムの処理はここで完結）
+      }
+    }
+
     if (invested > 0) {
       let gain = calcParamGain(newOps[item.param], item.basePer100, invested, investEfficiency);
       // ★ devのみ：投資時に選んだdevFocusが、反映時点の市場ニーズ（全社共通）と一致するかでボーナス/ペナルティ
@@ -494,6 +514,7 @@ function commitPendingInvestment(ops, investEfficiency = 1.0, currentMarketNeed 
     }
   });
   newOps.pendingInvestment = {}; // 反映済みなのでクリア
+  newOps.lastCsShortfall = csShortfall;
   return newOps;
 }
 
@@ -4064,7 +4085,7 @@ export default function App() {
               label, color, diff: ops[key] - prevOps[key],
             })).filter(c => Math.abs(c.diff) >= 0.05);
 
-            if (changes.length === 0 && !ops.lastDevFocusResult) return null;
+            if (changes.length === 0 && !ops.lastDevFocusResult && !ops.lastCsShortfall) return null;
             return (
               <Panel style={{marginBottom:14}}>
                 <Label style={{display:"block",marginBottom:10}}>⏳ 前Qの投資が反映されました</Label>
@@ -4100,6 +4121,24 @@ export default function App() {
                       </div>
                       <div style={{fontSize:10, color: r.matched ? C.green : C.orange, marginTop:2}}>
                         効果は通常の{r.matched ? "1.3倍" : "0.8倍"}でした
+                      </div>
+                    </div>
+                  );
+                })()}
+                {/* ★ CS投資不足による追加劣化の警告 */}
+                {ops.lastCsShortfall && (() => {
+                  const s = ops.lastCsShortfall;
+                  return (
+                    <div style={{
+                      marginTop: (changes.length > 0 || ops.lastDevFocusResult) ? 10 : 0,
+                      paddingTop: (changes.length > 0 || ops.lastDevFocusResult) ? 10 : 0,
+                      borderTop: (changes.length > 0 || ops.lastDevFocusResult) ? `1px dashed ${C.border}` : "none",
+                    }}>
+                      <div style={{fontSize:11, fontWeight:700, color:C.red, marginBottom:4}}>
+                        ⚠️ 店舗数に対してCS投資が不足しています
+                      </div>
+                      <div style={{fontSize:10, color:C.muted}}>
+                        CSがカバーしきれず、通常の{s.multiplier}倍の速さでサポート品質が低下しました（-{s.decayAmt.toFixed(1)}）
                       </div>
                     </div>
                   );
