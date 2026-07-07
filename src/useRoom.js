@@ -5,11 +5,16 @@ import { ref, set, get, update, onValue, off, serverTimestamp } from "firebase/d
 const GAME_VERSION = "6.2";
 const STORAGE_KEY = `saas_battle_room_v${GAME_VERSION}`;
 const TUTORIAL_KEY = `saas_tutorial_done_v${GAME_VERSION}`;
-// ★ App.jsx側のDEV_FOCUS_TYPES(_FOOD)と同じキー一覧（市場ニーズの初期化に使用。循環import回避のためここに複製）
+// ★ App.jsx側のDEV_FOCUS_TYPES系と同じキー一覧（市場ニーズの初期化に使用。循環import回避のためここに複製）
 const DEV_FOCUS_KEYS_FOR_ROOM_DEFAULT = ["efficiency", "uiux", "reliability"];
 const DEV_FOCUS_KEYS_FOR_ROOM_FOOD = ["order_speed", "menu_ui", "payment_hygiene"];
+const DEV_FOCUS_KEYS_FOR_ROOM_RETAIL = ["loyalty", "crm", "security"];
+const DEV_FOCUS_KEYS_FOR_ROOM_BEAUTY = ["reservation", "stylist_match", "crm_beauty"];
 function devFocusKeysForRoom(marketId) {
-  return marketId === "food" ? DEV_FOCUS_KEYS_FOR_ROOM_FOOD : DEV_FOCUS_KEYS_FOR_ROOM_DEFAULT;
+  if (marketId === "food") return DEV_FOCUS_KEYS_FOR_ROOM_FOOD;
+  if (marketId === "retail") return DEV_FOCUS_KEYS_FOR_ROOM_RETAIL;
+  if (marketId === "beauty") return DEV_FOCUS_KEYS_FOR_ROOM_BEAUTY;
+  return DEV_FOCUS_KEYS_FOR_ROOM_DEFAULT;
 }
 
 function clearOldVersionCache() {

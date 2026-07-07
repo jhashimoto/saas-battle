@@ -126,14 +126,27 @@ const DEV_FOCUS_TYPES_DEFAULT = {
   uiux:       { id:"uiux",       name:"UI/UX向上",   icon:"✨", desc:"使い心地・見た目の良さ。新規顧客の指名買いに効く。" },
   reliability:{ id:"reliability",name:"信頼性機能",   icon:"🛡️", desc:"セキュリティ・安定性・サポート体制。高単価顧客の維持に効く。" },
 };
-// ★ 飲食市場のみdevFocusの選択肢を業界特化にする（小売・美容は共通のまま）
+// ★ 市場ごとにdevFocusの選択肢を業界特化にする
 const DEV_FOCUS_TYPES_FOOD = {
   order_speed:    { id:"order_speed",    name:"注文処理速度向上",   icon:"⚡", desc:"注文〜提供までのスピード改善。既存顧客の継続利用に効く。" },
   menu_ui:        { id:"menu_ui",        name:"メニュー管理UI改善", icon:"📋", desc:"メニューの見やすさ・使いやすさ。新規顧客の獲得に効く。" },
   payment_hygiene:{ id:"payment_hygiene",name:"決済・衛生管理対応", icon:"🧼", desc:"キャッシュレス決済・衛生対応の強化。高単価顧客の維持に効く。" },
 };
+const DEV_FOCUS_TYPES_RETAIL = {
+  loyalty:  { id:"loyalty",  name:"ポイント・会員管理機能",     icon:"🎫", desc:"会員特典を充実させる機能。既存顧客の継続利用に効く。" },
+  crm:      { id:"crm",      name:"顧客分析・CRM機能",         icon:"📊", desc:"購買データを活用した顧客分析。新規顧客の獲得に効く。" },
+  security: { id:"security", name:"セキュリティ・個人情報保護対応", icon:"🔒", desc:"個人情報保護・セキュリティの強化。高単価顧客の維持に効く。" },
+};
+const DEV_FOCUS_TYPES_BEAUTY = {
+  reservation:   { id:"reservation",   name:"予約・キャンセル管理機能",   icon:"📅", desc:"予約枠とキャンセル対応の最適化。既存顧客の継続利用に効く。" },
+  stylist_match: { id:"stylist_match", name:"スタイリスト指名・カルテ機能", icon:"💇", desc:"指名のしやすさ・見つけやすさ。新規顧客の獲得に効く。" },
+  crm_beauty:    { id:"crm_beauty",    name:"顧客カルテ・来店履歴管理",   icon:"🗂️", desc:"来店履歴に基づくきめ細かな対応。高単価顧客の維持に効く。" },
+};
 function getDevFocusTypes(marketId) {
-  return marketId === "food" ? DEV_FOCUS_TYPES_FOOD : DEV_FOCUS_TYPES_DEFAULT;
+  if (marketId === "food") return DEV_FOCUS_TYPES_FOOD;
+  if (marketId === "retail") return DEV_FOCUS_TYPES_RETAIL;
+  if (marketId === "beauty") return DEV_FOCUS_TYPES_BEAUTY;
+  return DEV_FOCUS_TYPES_DEFAULT;
 }
 function getDevFocusKeys(marketId) {
   return Object.keys(getDevFocusTypes(marketId));
@@ -255,7 +268,7 @@ const RANDOM_EVENTS = [
     marketId:"food", prob:0.07, cat:"food",
     desc:"大手チェーンがモバイルオーダーの一括導入を検討中。品質審査が始まった。",
     impact:"品質(solutionQuality)が80以上なら新規獲得+20%", sentiment:"positive",
-    type:"auto", qualityAcquisitionBonus:{ threshold:80, ratio:0.2 } },
+    type:"auto", paramAcquisitionBonus:{ param:"solutionQuality", threshold:80, ratio:0.2 } },
   { id:"food_scandal",          icon:"🤢", name:"食中毒事件で飲食DXに不信感", title:"食中毒事件で飲食DXに不信感",
     marketId:"food", prob:0.05, cat:"food",
     desc:"大手チェーンでの食中毒事件が報道され、モバイルオーダーへの不信感が広がった。",
@@ -271,6 +284,50 @@ const RANDOM_EVENTS = [
     desc:"新興プレイヤーが標準価格の60%という破格の料金で参入してきた。",
     impact:"あなたの価格が標準以上なら、今Q解約率+3%", sentiment:"negative",
     type:"auto", highPriceChurnRatio:0.03 },
+
+  // --- 小売専用 ---
+  { id:"retail_bigchain",     icon:"🏢", name:"大手スーパーが会員証アプリを刷新検討", title:"大手スーパーが会員証アプリを刷新検討",
+    marketId:"retail", prob:0.06, cat:"retail",
+    desc:"全国チェーンの大手スーパーが老朽化した会員証システムの刷新を検討中。導入先の選定が始まった。",
+    impact:"品質(solutionQuality)と営業力(salesPower)がともに80以上なら大型新規獲得+25%", sentiment:"positive",
+    type:"auto", dualAcquisitionBonus:{ params:["solutionQuality","salesPower"], threshold:80, ratio:0.25 } },
+  { id:"retail_privacy_law",  icon:"🛃", name:"個人情報保護法の改正で対応コスト増", title:"個人情報保護法の改正で対応コスト増",
+    marketId:"retail", prob:0.05, cat:"retail",
+    desc:"小売業向けの個人情報保護規制が強化された。セキュリティ対応が不十分な企業はリスクが高まる。",
+    impact:"devFocusで「セキュリティ・個人情報保護対応」を選んでいなければ解約率+3%", sentiment:"negative",
+    type:"auto", devFocusPenaltyIfNotChosen:{ focus:"security", churnRatio:0.03 } },
+  { id:"retail_ec_surge",     icon:"🛒", name:"EC連携需要が急増", title:"EC連携需要が急増",
+    marketId:"retail", prob:0.06, cat:"retail",
+    desc:"実店舗とオンラインの統合ニーズが高まり、会員証のデジタル化が加速している。",
+    impact:"今Q全社の新規獲得+15%（市場全体が拡大）", sentiment:"positive",
+    type:"auto", allAcquisitionBonus:0.15 },
+  { id:"retail_price_war",    icon:"💰", name:"競合が中小小売向けに無料プランを投入", title:"競合が中小小売向けに無料プランを投入",
+    marketId:"retail", prob:0.05, cat:"retail",
+    desc:"新興プレイヤーが中小小売店向けに無料プランで一気にシェアを狙いに来た。",
+    impact:"あなたの価格が標準以上なら、今Q解約率+4%", sentiment:"negative",
+    type:"auto", highPriceChurnRatioAll:0.04 },
+
+  // --- 美容専用 ---
+  { id:"beauty_sns_buzz",      icon:"📱", name:"美容師SNSで予約システムが話題に", title:"美容師SNSで予約システムが話題に",
+    marketId:"beauty", prob:0.06, cat:"beauty",
+    desc:"インフルエンサー美容師がSNSで予約管理の便利さを発信。美容室オーナーへの口コミが広がっている。",
+    impact:"ブランド(brandAwareness)が80以上なら新規獲得+25%", sentiment:"positive",
+    type:"auto", paramAcquisitionBonus:{ param:"brandAwareness", threshold:80, ratio:0.25 } },
+  { id:"beauty_noshowproblem", icon:"🙅", name:"無断キャンセル問題が業界で深刻化", title:"無断キャンセル問題が業界で深刻化",
+    marketId:"beauty", prob:0.06, cat:"beauty",
+    desc:"ノーショウ（無断キャンセル）問題が社会的に注目され、対策機能への需要が急増した。",
+    impact:"devFocusで「予約・キャンセル管理機能」を選んでいれば効果1.5倍", sentiment:"positive",
+    type:"auto", devFocusEffectBoost:{ focus:"reservation", ratio:0.5 } },
+  { id:"beauty_highend",       icon:"💎", name:"高級サロンのDX需要が急拡大", title:"高級サロンのDX需要が急拡大",
+    marketId:"beauty", prob:0.05, cat:"beauty",
+    desc:"高単価サロンがカルテ管理と顧客体験向上に投資し始めた。品質重視の企業に追い風。",
+    impact:"価格が標準以上、かつ品質(solutionQuality)が80以上なら新規獲得+20%", sentiment:"positive",
+    type:"auto", priceQualityAcquisitionBonus:{ qualityThreshold:80, ratio:0.2 } },
+  { id:"beauty_staff_turnover",icon:"😮‍💨", name:"美容師の離職率上昇でサロン経営が不安定化", title:"美容師の離職率上昇でサロン経営が不安定化",
+    marketId:"beauty", prob:0.04, cat:"beauty",
+    desc:"業界全体でスタッフの離職が増え、サロン自体の閉店が相次いでいる。",
+    impact:"今Q全社の自然解約率+3%（市場全体の縮小）", sentiment:"negative",
+    type:"auto", allChurnRatio:0.03 },
 
   // --- 選択型 ---
   { id:"acquisition_offer",icon:"💰", name:"大手からの買収オファー",         title:"大手からの買収オファー",         prob:0.03, cat:"choice",
@@ -944,7 +1001,8 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
     nBs.cash += nRev - nCogs - nVarC - nTotalBaseOpex - nAllocSga - nAllocCap - nInt;
     nBs.retainedEarnings += nNetIncome;
 
-    return { ...n, ops: nFinalOps, bs: nBs, lastSpecial: n.usedSpecial };
+    // ★ 業界イベント（新規獲得ボーナス系）でNPCにも同じ計算を適用できるよう、今Qの競争結果を保持しておく
+    return { ...n, ops: nFinalOps, bs: nBs, lastSpecial: n.usedSpecial, lastCompetResult: nr };
   });
 
   const newUsedSpecials = playerSpecial && SPECIAL_ACTIONS[playerSpecial]?.oneTime
@@ -3599,33 +3657,77 @@ export default function App() {
         const topScore = Math.max(myScore, ...newNpcs.map(n=>competitiveScore(n.ops, market?.arpu)));
         if (myScore >= topScore) newActiveEffects.push({id:"partnerBonus", type:"acquisitionBonus", value:0.5, remaining:1});
       }
-      // ★ 飲食専用：品質が高い企業への新規獲得ボーナス（あなたのみ対象）
-      if (ev.qualityAcquisitionBonus) {
-        const { threshold, ratio } = ev.qualityAcquisitionBonus;
-        if ((finalOps.solutionQuality || 0) >= threshold) {
+      // ★ 業界イベント：特定パラメータが高い企業への新規獲得ボーナス（あなた＋NPC全社。NPC側はfinalNpcsのmapで処理）
+      if (ev.paramAcquisitionBonus) {
+        const { param, threshold, ratio } = ev.paramAcquisitionBonus;
+        const paramLabel = ({solutionQuality:"品質(solutionQuality)", brandAwareness:"ブランド(brandAwareness)", salesPower:"営業力(salesPower)", supportQuality:"CS(supportQuality)"})[param] || param;
+        if ((finalOps[param] || 0) >= threshold) {
           const bonus = Math.floor((pl.competResult.newFromUnclaimed || 0) * ratio);
           finalOps = {...finalOps, stores: finalOps.stores + bonus};
-          dynamicImpact = { resolvedImpact: `品質(solutionQuality)が${threshold}以上のため、新規獲得+${bonus}店`, resolvedSentiment: "positive" };
+          dynamicImpact = { resolvedImpact: `${paramLabel}が${threshold}以上のため、新規獲得+${bonus}店`, resolvedSentiment: "positive" };
         } else {
-          dynamicImpact = { resolvedImpact: `品質(solutionQuality)が${threshold}未満のため、今回のあなたへの影響はありません`, resolvedSentiment: "neutral" };
+          dynamicImpact = { resolvedImpact: `${paramLabel}が${threshold}未満のため、今回のあなたへの影響はありません`, resolvedSentiment: "neutral" };
         }
       }
-      // ★ 飲食専用：食中毒スキャンダルによる全社の解約率上昇（あなた＋NPC全社）
+      // ★ 業界イベント：複数パラメータがともに高い企業への大型新規獲得ボーナス（あなた＋NPC全社）
+      if (ev.dualAcquisitionBonus) {
+        const { params, threshold, ratio } = ev.dualAcquisitionBonus;
+        const qualified = params.every(p => (finalOps[p] || 0) >= threshold);
+        const paramLabels = params.map(p => ({solutionQuality:"品質", salesPower:"営業力", brandAwareness:"ブランド", supportQuality:"CS"})[p] || p).join("と");
+        if (qualified) {
+          const bonus = Math.floor((pl.competResult.newFromUnclaimed || 0) * ratio);
+          finalOps = {...finalOps, stores: finalOps.stores + bonus};
+          dynamicImpact = { resolvedImpact: `${paramLabels}がともに${threshold}以上のため、大型新規獲得+${bonus}店`, resolvedSentiment: "positive" };
+        } else {
+          dynamicImpact = { resolvedImpact: `${paramLabels}のいずれかが${threshold}未満のため、今回のあなたへの影響はありません`, resolvedSentiment: "neutral" };
+        }
+      }
+      // ★ 業界イベント：価格が標準以上かつ品質が高い企業への新規獲得ボーナス（あなた＋NPC全社）
+      if (ev.priceQualityAcquisitionBonus) {
+        const { qualityThreshold, ratio } = ev.priceQualityAcquisitionBonus;
+        const qualified = (finalOps.priceMultiplier || 1.0) >= 1.0 && (finalOps.solutionQuality || 0) >= qualityThreshold;
+        if (qualified) {
+          const bonus = Math.floor((pl.competResult.newFromUnclaimed || 0) * ratio);
+          finalOps = {...finalOps, stores: finalOps.stores + bonus};
+          dynamicImpact = { resolvedImpact: `価格が標準以上・品質が${qualityThreshold}以上のため、新規獲得+${bonus}店`, resolvedSentiment: "positive" };
+        } else {
+          dynamicImpact = { resolvedImpact: "条件（価格が標準以上かつ品質が高い）を満たさないため、今回のあなたへの影響はありません", resolvedSentiment: "neutral" };
+        }
+      }
+      // ★ 業界イベント：市場全体の拡大による全社の新規獲得ボーナス（あなた＋NPC全社、無条件）
+      if (ev.allAcquisitionBonus) {
+        const bonus = Math.floor((pl.competResult.newFromUnclaimed || 0) * ev.allAcquisitionBonus);
+        finalOps = {...finalOps, stores: finalOps.stores + bonus};
+        dynamicImpact = { resolvedImpact: `市場拡大の恩恵で、新規獲得+${bonus}店`, resolvedSentiment: "positive" };
+      }
+      // ★ 業界イベント：全社の解約率上昇（あなた＋NPC全社。NPC側はfinalNpcsのmapで処理）
       if (ev.allChurnRatio) {
         finalOps = {...finalOps, stores: Math.floor(finalOps.stores * (1 - ev.allChurnRatio))};
         dynamicImpact = { resolvedImpact: `解約率+${Math.round(ev.allChurnRatio*100)}%の影響で、あなたの店舗も減少しました`, resolvedSentiment: "negative" };
       }
-      // ★ 飲食専用：特定devFocusを選んでいた場合の効果ブースト（あなたのみ対象）
+      // ★ 業界イベント：特定devFocusを選んでいた場合の効果ブースト（あなた＋NPC全社。NPC側はfinalNpcsのmapで処理）
       if (ev.devFocusEffectBoost) {
         const { focus, ratio } = ev.devFocusEffectBoost;
-        const matched = finalOps.lastDevFocusResult?.focus === focus && (finalOps.lastDevFocusResult.gain || 0) > 0;
+        const focusName = getDevFocusTypes(marketId)[focus]?.name || focus;
+        const matched = finalOps.lastDevFocusResult?.focus === focus;
         if (matched) {
-          const extra = Math.floor(finalOps.lastDevFocusResult.gain * ratio);
+          const extra = Math.floor((finalOps.lastDevFocusResult.gain || 0) * ratio);
           finalOps = {...finalOps, solutionQuality: Math.min(PARAM_MAX, finalOps.solutionQuality + extra)};
-          const focusName = getDevFocusTypes(marketId)[focus]?.name || focus;
-          dynamicImpact = { resolvedImpact: `devFocus「${focusName}」の効果が1.5倍（+${extra}）になりました`, resolvedSentiment: "positive" };
+          dynamicImpact = { resolvedImpact: `devFocus「${focusName}」の効果が1.5倍（+${extra}）になりました`, resolvedSentiment: extra > 0 ? "positive" : "neutral" };
         } else {
-          dynamicImpact = { resolvedImpact: "該当するdevFocusを選んでいなかったため、今回のあなたへの影響はありません", resolvedSentiment: "neutral" };
+          dynamicImpact = { resolvedImpact: `devFocus「${focusName}」を選んでいなかったため、今回のあなたへの影響はありません`, resolvedSentiment: "neutral" };
+        }
+      }
+      // ★ 業界イベント：特定devFocusを選んでいない企業への解約率ペナルティ（あなた＋NPC全社。NPC側はfinalNpcsのmapで処理）
+      if (ev.devFocusPenaltyIfNotChosen) {
+        const { focus, churnRatio } = ev.devFocusPenaltyIfNotChosen;
+        const chosen = finalOps.lastDevFocusResult?.focus === focus;
+        const focusName = getDevFocusTypes(marketId)[focus]?.name || focus;
+        if (!chosen) {
+          finalOps = {...finalOps, stores: Math.floor(finalOps.stores * (1 - churnRatio))};
+          dynamicImpact = { resolvedImpact: `devFocus「${focusName}」を選んでいなかったため、解約率+${Math.round(churnRatio*100)}%`, resolvedSentiment: "negative" };
+        } else {
+          dynamicImpact = { resolvedImpact: `devFocus「${focusName}」を選んでいたため、今回のあなたへの影響はありません`, resolvedSentiment: "neutral" };
         }
       }
       // ★ 飲食専用：価格が標準以上の場合の解約率上乗せ（あなたのみ対象）
@@ -3635,6 +3737,15 @@ export default function App() {
           dynamicImpact = { resolvedImpact: `価格が標準以上のため、解約率+${Math.round(ev.highPriceChurnRatio*100)}%`, resolvedSentiment: "negative" };
         } else {
           dynamicImpact = { resolvedImpact: "価格が標準以下のため、今回のあなたへの影響はありません", resolvedSentiment: "neutral" };
+        }
+      }
+      // ★ 業界イベント：価格が標準以上の場合の解約率上乗せ（あなた＋NPC全社。NPC側はfinalNpcsのmapで処理）
+      if (ev.highPriceChurnRatioAll) {
+        if ((finalOps.priceMultiplier || 1.0) >= 1.0) {
+          finalOps = {...finalOps, stores: Math.floor(finalOps.stores * (1 - ev.highPriceChurnRatioAll))};
+          dynamicImpact = { resolvedImpact: `価格が標準以上のため、解約率+${Math.round(ev.highPriceChurnRatioAll*100)}%`, resolvedSentiment: "negative" };
+        } else {
+          dynamicImpact = { resolvedImpact: "価格が標準未満のため、今回のあなたへの影響はありません", resolvedSentiment: "neutral" };
         }
       }
     }
@@ -3650,9 +3761,59 @@ export default function App() {
         if (npcDamageTarget.stores) nOps = {...nOps, stores: Math.floor(nOps.stores*(1-npcDamageTarget.stores))};
         if (npcDamageTarget.brandAwareness) nOps = {...nOps, brandAwareness: Math.max(0,(nOps.brandAwareness||0)-npcDamageTarget.brandAwareness)};
       }
-      // ★ 飲食専用：食中毒スキャンダルは全社（NPC含む）に解約率上昇が及ぶ
+      // ★ 業界イベント：食中毒スキャンダル等、全社（NPC含む）に解約率上昇が及ぶもの
       if (ev?.allChurnRatio) {
         nOps = {...nOps, stores: Math.floor(nOps.stores * (1 - ev.allChurnRatio))};
+      }
+      // ★ 業界イベント：特定パラメータが高いNPCへの新規獲得ボーナス
+      if (ev?.paramAcquisitionBonus) {
+        const { param, threshold, ratio } = ev.paramAcquisitionBonus;
+        if ((nOps[param] || 0) >= threshold) {
+          const bonus = Math.floor((n.lastCompetResult?.newFromUnclaimed || 0) * ratio);
+          nOps = {...nOps, stores: nOps.stores + bonus};
+        }
+      }
+      // ★ 業界イベント：複数パラメータがともに高いNPCへの大型新規獲得ボーナス
+      if (ev?.dualAcquisitionBonus) {
+        const { params, threshold, ratio } = ev.dualAcquisitionBonus;
+        if (params.every(p => (nOps[p] || 0) >= threshold)) {
+          const bonus = Math.floor((n.lastCompetResult?.newFromUnclaimed || 0) * ratio);
+          nOps = {...nOps, stores: nOps.stores + bonus};
+        }
+      }
+      // ★ 業界イベント：価格が標準以上かつ品質が高いNPCへの新規獲得ボーナス
+      if (ev?.priceQualityAcquisitionBonus) {
+        const { qualityThreshold, ratio } = ev.priceQualityAcquisitionBonus;
+        if ((nOps.priceMultiplier || 1.0) >= 1.0 && (nOps.solutionQuality || 0) >= qualityThreshold) {
+          const bonus = Math.floor((n.lastCompetResult?.newFromUnclaimed || 0) * ratio);
+          nOps = {...nOps, stores: nOps.stores + bonus};
+        }
+      }
+      // ★ 業界イベント：市場全体の拡大による全社（NPC含む）の新規獲得ボーナス
+      if (ev?.allAcquisitionBonus) {
+        const bonus = Math.floor((n.lastCompetResult?.newFromUnclaimed || 0) * ev.allAcquisitionBonus);
+        nOps = {...nOps, stores: nOps.stores + bonus};
+      }
+      // ★ 業界イベント：特定devFocusを選んでいたNPCへの効果ブースト
+      if (ev?.devFocusEffectBoost) {
+        const { focus, ratio } = ev.devFocusEffectBoost;
+        if (nOps.lastDevFocusResult?.focus === focus && (nOps.lastDevFocusResult.gain || 0) > 0) {
+          const extra = Math.floor(nOps.lastDevFocusResult.gain * ratio);
+          nOps = {...nOps, solutionQuality: Math.min(PARAM_MAX, nOps.solutionQuality + extra)};
+        }
+      }
+      // ★ 業界イベント：特定devFocusを選んでいないNPCへの解約率ペナルティ
+      if (ev?.devFocusPenaltyIfNotChosen) {
+        const { focus, churnRatio } = ev.devFocusPenaltyIfNotChosen;
+        if (nOps.lastDevFocusResult?.focus !== focus) {
+          nOps = {...nOps, stores: Math.floor(nOps.stores * (1 - churnRatio))};
+        }
+      }
+      // ★ 業界イベント：価格が標準以上のNPCへの解約率上乗せ
+      if (ev?.highPriceChurnRatioAll) {
+        if ((nOps.priceMultiplier || 1.0) >= 1.0) {
+          nOps = {...nOps, stores: Math.floor(nOps.stores * (1 - ev.highPriceChurnRatioAll))};
+        }
       }
       return {...n, ops: nOps};
     });
