@@ -121,20 +121,32 @@ const BUDGET_ITEMS = [
 // ★ 機能投資のミスマッチリスク：devへの投資は「顧客価値の方向性」を選ぶ
 // 市場の顧客ニーズは見えないまま緩やかに変動し、選択と一致すればボーナス、外れれば減衰
 // ============================================================
-const DEV_FOCUS_TYPES = {
+const DEV_FOCUS_TYPES_DEFAULT = {
   efficiency: { id:"efficiency", name:"業務効率化",   icon:"⏱️", desc:"時間・手間を減らす機能。既存顧客の継続利用に効く。" },
   uiux:       { id:"uiux",       name:"UI/UX向上",   icon:"✨", desc:"使い心地・見た目の良さ。新規顧客の指名買いに効く。" },
   reliability:{ id:"reliability",name:"信頼性機能",   icon:"🛡️", desc:"セキュリティ・安定性・サポート体制。高単価顧客の維持に効く。" },
 };
-const DEV_FOCUS_KEYS = Object.keys(DEV_FOCUS_TYPES);
+// ★ 飲食市場のみdevFocusの選択肢を業界特化にする（小売・美容は共通のまま）
+const DEV_FOCUS_TYPES_FOOD = {
+  order_speed:    { id:"order_speed",    name:"注文処理速度向上",   icon:"⚡", desc:"注文〜提供までのスピード改善。既存顧客の継続利用に効く。" },
+  menu_ui:        { id:"menu_ui",        name:"メニュー管理UI改善", icon:"📋", desc:"メニューの見やすさ・使いやすさ。新規顧客の獲得に効く。" },
+  payment_hygiene:{ id:"payment_hygiene",name:"決済・衛生管理対応", icon:"🧼", desc:"キャッシュレス決済・衛生対応の強化。高単価顧客の維持に効く。" },
+};
+function getDevFocusTypes(marketId) {
+  return marketId === "food" ? DEV_FOCUS_TYPES_FOOD : DEV_FOCUS_TYPES_DEFAULT;
+}
+function getDevFocusKeys(marketId) {
+  return Object.keys(getDevFocusTypes(marketId));
+}
 const DEV_MATCH_BONUS = 1.3;   // 市場ニーズと一致した場合の効果倍率
 const DEV_MISMATCH_PENALTY = 0.8; // 不一致だった場合の効果倍率
 
 // 市場の顧客ニーズを更新する（Qごとに緩やかに変動：70%維持・30%でランダムシフト）
-function evolveMarketNeed(currentNeed) {
-  if (!currentNeed) return DEV_FOCUS_KEYS[Math.floor(Math.random() * DEV_FOCUS_KEYS.length)];
+function evolveMarketNeed(currentNeed, marketId) {
+  const keys = getDevFocusKeys(marketId);
+  if (!currentNeed || !keys.includes(currentNeed)) return keys[Math.floor(Math.random() * keys.length)];
   if (Math.random() < 0.3) {
-    const others = DEV_FOCUS_KEYS.filter(k => k !== currentNeed);
+    const others = keys.filter(k => k !== currentNeed);
     return others[Math.floor(Math.random() * others.length)];
   }
   return currentNeed;
@@ -176,71 +188,93 @@ const SPECIAL_ACTIONS = {
 // ============================================================
 const RANDOM_EVENTS = [
   // --- 市場拡大 ---
-  { id:"chain_adoption",   icon:"🏗️", name:"大手チェーンがLINE導入を決定", prob:0.06, cat:"market",
-    desc:"業界の追い風。市場総店舗数が一時的に+150店拡大。",
+  { id:"chain_adoption",   icon:"🏗️", name:"大手チェーンがLINE導入を決定", title:"大手チェーンがLINE導入を決定", prob:0.06, cat:"market",
+    desc:"業界の追い風。市場総店舗数が一時的に+150店拡大。", impact:"市場総店舗数+150店（一時的）", sentiment:"positive",
     type:"auto", marketBoost:150 },
-  { id:"mall_opening",     icon:"🏬", name:"大型モール開業ラッシュ",        prob:0.05, cat:"market",
-    desc:"小売・飲食の潜在顧客が急増。市場+100店。",
+  { id:"mall_opening",     icon:"🏬", name:"大型モール開業ラッシュ",        title:"大型モール開業ラッシュ",        prob:0.05, cat:"market",
+    desc:"小売・飲食の潜在顧客が急増。市場+100店。", impact:"市場総店舗数+100店（一時的）", sentiment:"positive",
     type:"auto", marketBoost:100 },
-  { id:"dx_subsidy",       icon:"🏛️", name:"デジタル化補助金が可決",        prob:0.05, cat:"market",
-    desc:"政府補助で導入障壁が低下。全社の新規獲得+30%ボーナス（1Q）。",
+  { id:"dx_subsidy",       icon:"🏛️", name:"デジタル化補助金が可決",        title:"デジタル化補助金が可決",        prob:0.05, cat:"market",
+    desc:"政府補助で導入障壁が低下。全社の新規獲得+30%ボーナス（1Q）。", impact:"全社の新規獲得+30%（今Q）", sentiment:"positive",
     type:"auto", acquisitionBonus:0.3 },
 
   // --- 競合ショック ---
-  { id:"rival_bankrupt",   icon:"💀", name:"競合が資金枯渇",                prob:0.06, cat:"rival",
-    desc:"競合1社の店舗が40%流出。シェア奪取のチャンス。",
+  { id:"rival_bankrupt",   icon:"💀", name:"競合が資金枯渇",                title:"競合が資金枯渇",                prob:0.06, cat:"rival",
+    desc:"競合1社の店舗が40%流出。シェア奪取のチャンス。", impact:"競合1社の店舗-40%", sentiment:"positive",
     type:"auto", npcDamage:{ stores:0.4 } },
-  { id:"rival_ma",         icon:"🤝", name:"競合が大手にM&A",               prob:0.05, cat:"rival",
-    desc:"競合1社が大手資本を獲得。全パラメータ+15の強敵に。",
+  { id:"rival_ma",         icon:"🤝", name:"競合が大手にM&A",               title:"競合が大手にM&A",               prob:0.05, cat:"rival",
+    desc:"競合1社が大手資本を獲得。全パラメータ+15の強敵に。", impact:"競合1社の全パラメータ+15", sentiment:"negative",
     type:"auto", npcBoostTarget:{ allParams:15 } },
-  { id:"rival_scandal",    icon:"💥", name:"競合がスキャンダル",             prob:0.07, cat:"rival",
-    desc:"競合1社のブランド-40。店舗の一部が流出してくる可能性。",
+  { id:"rival_scandal",    icon:"💥", name:"競合がスキャンダル",             title:"競合がスキャンダル",             prob:0.07, cat:"rival",
+    desc:"競合1社のブランド-40。店舗の一部が流出してくる可能性。", impact:"競合1社のブランド-40", sentiment:"positive",
     type:"auto", npcDamage:{ brandAwareness:40 } },
 
   // --- 自社チャンス ---
-  { id:"viral_mention",    icon:"🔥", name:"著名人がSNSで紹介",             prob:0.06, cat:"chance",
-    desc:"一時的にブランド認知が急上昇。+40（次Qで半減）。",
+  { id:"viral_mention",    icon:"🔥", name:"著名人がSNSで紹介",             title:"著名人がSNSで紹介",             prob:0.06, cat:"chance",
+    desc:"一時的にブランド認知が急上昇。+40（次Qで半減）。", impact:"あなたのブランド+40（一時的）", sentiment:"positive",
     type:"auto", opsBoost:{ brandAwareness:40 } },
-  { id:"engineer_join",    icon:"👨‍💻", name:"優秀エンジニア獲得",            prob:0.06, cat:"chance",
-    desc:"即戦力採用成功。solutionQuality+20。",
+  { id:"engineer_join",    icon:"👨‍💻", name:"優秀エンジニア獲得",            title:"優秀エンジニア獲得",            prob:0.06, cat:"chance",
+    desc:"即戦力採用成功。solutionQuality+20。", impact:"あなたの品質+20", sentiment:"positive",
     type:"auto", opsBoost:{ solutionQuality:20 } },
-  { id:"line_staff_join",  icon:"🌟", name:"元LINE社員が転職入社",           prob:0.05, cat:"chance",
-    desc:"社内知見が一気に強化。営業力+15、品質+10。",
+  { id:"line_staff_join",  icon:"🌟", name:"元LINE社員が転職入社",           title:"元LINE社員が転職入社",           prob:0.05, cat:"chance",
+    desc:"社内知見が一気に強化。営業力+15、品質+10。", impact:"あなたの営業力+15、品質+10", sentiment:"positive",
     type:"auto", opsBoost:{ salesPower:15, solutionQuality:10 } },
 
   // --- 自社リスク ---
-  { id:"key_resign",       icon:"😱", name:"キーパーソンが離職",             prob:0.07, cat:"risk",
-    desc:"中核人材が突然退職。ランダムなパラメータが-20。",
+  { id:"key_resign",       icon:"😱", name:"キーパーソンが離職",             title:"キーパーソンが離職",             prob:0.07, cat:"risk",
+    desc:"中核人材が突然退職。ランダムなパラメータが-20。", impact:"あなたのランダムなパラメータ-20", sentiment:"negative",
     type:"auto", opsRisk:{ randomParam:-20 } },
-  { id:"security_breach",  icon:"🔓", name:"セキュリティ事故",               prob:0.05, cat:"risk",
-    desc:"情報漏洩発覚。店舗-15%、CS品質-15、ブランド-20。",
+  { id:"security_breach",  icon:"🔓", name:"セキュリティ事故",               title:"セキュリティ事故",               prob:0.05, cat:"risk",
+    desc:"情報漏洩発覚。店舗-15%、CS品質-15、ブランド-20。", impact:"あなたの店舗-15%、CS-15、ブランド-20", sentiment:"negative",
     type:"auto", opsRisk:{ storeRatio:-0.15, supportQuality:-15, brandAwareness:-20 } },
-  { id:"server_down",      icon:"💻", name:"サーバー大規模障害",             prob:0.06, cat:"risk",
-    desc:"サービス停止。今Q売上-30%、解約率が一時悪化。",
+  { id:"server_down",      icon:"💻", name:"サーバー大規模障害",             title:"サーバー大規模障害",             prob:0.06, cat:"risk",
+    desc:"サービス停止。今Q売上-30%、解約率が一時悪化。", impact:"あなたの今Q売上-30%", sentiment:"negative",
     type:"auto", revenueShock:-0.30 },
 
   // --- LINEプラットフォーム ---
-  { id:"line_new_feature", icon:"📱", name:"LINE新機能リリース",             prob:0.07, cat:"platform",
-    desc:"品質が高い社ほど恩恵大。solutionQuality上位社に+15ボーナス。",
+  { id:"line_new_feature", icon:"📱", name:"LINE新機能リリース",             title:"LINE新機能リリース",             prob:0.07, cat:"platform",
+    desc:"品質が高い社ほど恩恵大。solutionQuality上位社に+15ボーナス。", impact:"品質トップのあなたなら品質+15", sentiment:"positive",
     type:"auto", lineFeatureBonus:true },
-  { id:"line_spec_change", icon:"🔧", name:"LINE仕様変更（厳格化）",         prob:0.07, cat:"platform",
-    desc:"全社に開発対応コストが発生。品質が低いほど打撃大。",
+  { id:"line_spec_change", icon:"🔧", name:"LINE仕様変更（厳格化）",         title:"LINE仕様変更（厳格化）",         prob:0.07, cat:"platform",
+    desc:"全社に開発対応コストが発生。品質が低いほど打撃大。", impact:"対応コストであなたの現金が減少", sentiment:"negative",
     type:"auto", bsEffect:(bs,ops)=>({...bs, cash:bs.cash-Math.max(30,Math.floor((100-ops.solutionQuality)*0.8))}) },
-  { id:"line_partner",     icon:"🏆", name:"LINEパートナー認定制度開始",     prob:0.04, cat:"platform",
-    desc:"品質スコア最高社が認定取得。競合奪取率+50%（1Q）。",
+  { id:"line_partner",     icon:"🏆", name:"LINEパートナー認定制度開始",     title:"LINEパートナー認定制度開始",     prob:0.04, cat:"platform",
+    desc:"品質スコア最高社が認定取得。競合奪取率+50%（1Q）。", impact:"品質トップのあなたなら競合奪取率+50%（次Q）", sentiment:"positive",
     type:"auto", partnerBonus:true },
 
   // --- マクロ環境 ---
-  { id:"recession",        icon:"📉", name:"景気後退",                       prob:0.05, cat:"macro",
-    desc:"消費低迷。全社の売上-20%、2Q継続。",
+  { id:"recession",        icon:"📉", name:"景気後退",                       title:"景気後退",                       prob:0.05, cat:"macro",
+    desc:"消費低迷。全社の売上-20%、2Q継続。", impact:"あなたの売上-20%が2Q継続", sentiment:"negative",
     type:"auto", revenueShock:-0.20, duration:2 },
-  { id:"dx_boom",          icon:"🚀", name:"DXブーム",                       prob:0.05, cat:"macro",
-    desc:"社会全体のデジタル化加速。全社の投資上限+200万/Q（2Q）。",
+  { id:"dx_boom",          icon:"🚀", name:"DXブーム",                       title:"DXブーム",                       prob:0.05, cat:"macro",
+    desc:"社会全体のデジタル化加速。全社の投資上限+200万/Q（2Q）。", impact:"あなたの投資上限+200万/Qが2Q継続", sentiment:"positive",
     type:"auto", investBonus:200, duration:2 },
 
+  // --- 飲食専用 ---
+  { id:"food_chain_review",     icon:"🔍", name:"大手牛丼チェーンが導入検討", title:"大手牛丼チェーンが導入検討",
+    marketId:"food", prob:0.07, cat:"food",
+    desc:"大手チェーンがモバイルオーダーの一括導入を検討中。品質審査が始まった。",
+    impact:"品質(solutionQuality)が80以上なら新規獲得+20%", sentiment:"positive",
+    type:"auto", qualityAcquisitionBonus:{ threshold:80, ratio:0.2 } },
+  { id:"food_scandal",          icon:"🤢", name:"食中毒事件で飲食DXに不信感", title:"食中毒事件で飲食DXに不信感",
+    marketId:"food", prob:0.05, cat:"food",
+    desc:"大手チェーンでの食中毒事件が報道され、モバイルオーダーへの不信感が広がった。",
+    impact:"全社の解約率が今Qのみ+5%", sentiment:"negative",
+    type:"auto", allChurnRatio:0.05 },
+  { id:"food_lunch_rush",       icon:"🍽️", name:"ランチ混雑対応の需要が急増", title:"ランチ混雑対応の需要が急増",
+    marketId:"food", prob:0.06, cat:"food",
+    desc:"働き方改革でランチ需要が拡大。注文処理速度への関心が高まっている。",
+    impact:"devFocusで「注文処理速度向上」を選んでいれば効果1.5倍", sentiment:"positive",
+    type:"auto", devFocusEffectBoost:{ focus:"order_speed", ratio:0.5 } },
+  { id:"food_competitor_price", icon:"💸", name:"競合が価格攻勢を開始",       title:"競合が価格攻勢を開始",
+    marketId:"food", prob:0.05, cat:"food",
+    desc:"新興プレイヤーが標準価格の60%という破格の料金で参入してきた。",
+    impact:"あなたの価格が標準以上なら、今Q解約率+3%", sentiment:"negative",
+    type:"auto", highPriceChurnRatio:0.03 },
+
   // --- 選択型 ---
-  { id:"acquisition_offer",icon:"💰", name:"大手からの買収オファー",         prob:0.03, cat:"choice",
-    desc:"大手IT企業から買収提案。資金力を得るか、独立を貫くか。",
+  { id:"acquisition_offer",icon:"💰", name:"大手からの買収オファー",         title:"大手からの買収オファー",         prob:0.03, cat:"choice",
+    desc:"大手IT企業から買収提案。資金力を得るか、独立を貫くか。", impact:"資本提携か独立継続かを選択", sentiment:"positive",
     type:"choice",
     choices:[
       { label:"条件付きで受け入れる（資本提携）", icon:"🤝",
@@ -250,8 +284,8 @@ const RANDOM_EVENTS = [
         desc:"「独立宣言」で顧客・採用の支持が高まる。ブランド+30、品質+10。",
         opsBoost:{ brandAwareness:30, solutionQuality:10 } },
     ]},
-  { id:"partnership_offer",icon:"🤝", name:"大手流通との業務提携オファー",  prob:0.05, cat:"choice",
-    desc:"大手流通チェーンから提携打診。即効性はあるがコストも大きい。",
+  { id:"partnership_offer",icon:"🤝", name:"大手流通との業務提携オファー",  title:"大手流通との業務提携オファー",  prob:0.05, cat:"choice",
+    desc:"大手流通チェーンから提携打診。即効性はあるがコストも大きい。", impact:"提携するかどうかを選択", sentiment:"positive",
     type:"choice",
     choices:[
       { label:"提携する",  icon:"🏬",
@@ -261,8 +295,8 @@ const RANDOM_EVENTS = [
         desc:"独自路線を維持。変化なし。",
         effect:"none" },
     ]},
-  { id:"talent_war",       icon:"⚔️", name:"エンジニア引き抜き合戦",        prob:0.05, cat:"choice",
-    desc:"競合が自社エンジニアを引き抜こうとしている。どう対処する？",
+  { id:"talent_war",       icon:"⚔️", name:"エンジニア引き抜き合戦",        title:"エンジニア引き抜き合戦",        prob:0.05, cat:"choice",
+    desc:"競合が自社エンジニアを引き抜こうとしている。どう対処する？", impact:"引き止めるか許容するかを選択", sentiment:"negative",
     type:"choice",
     choices:[
       { label:"給与大幅引き上げ", icon:"💸",
@@ -715,8 +749,8 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
   const investEfficiency = pt?.investEfficiency || 1.0;
   const baseOpex = pt?.baseOpex || 100;
   // ★ 市場の顧客ニーズ（全社共通、見えない）。次Qに向けて1回だけ更新し、全員が同じ値を参照する
-  const currentMarketNeed = marketNeed || DEV_FOCUS_KEYS[0];
-  const nextMarketNeed = evolveMarketNeed(currentMarketNeed);
+  const currentMarketNeed = marketNeed || getDevFocusKeys(market.id)[0];
+  const nextMarketNeed = evolveMarketNeed(currentMarketNeed, market.id);
 
   // ★ ③不戦条約：プレイヤーがtruceProposalsで提案したNPCに対し、NPCがランダムに応諾するか判定
   // 受諾率：自分のスコアが相手より劣っているほど受けやすい（劣勢側が和を結びたがる、という自然な動機）
@@ -766,7 +800,10 @@ function processQuarter(playerBs, playerOps, playerAlloc, playerSpecial,
       alloc = { sales: nBudget*0.1, dev: nBudget*0.5, marketing: nBudget*0.1, price: nBudget*0.15, cs: nBudget*0.15 };
     }
     // ★ NPCもdevFocusをランダムに選ぶ（プレイヤーと同じ不確実性を持つ）
-    if (alloc.dev > 0) alloc.devFocus = DEV_FOCUS_KEYS[Math.floor(Math.random() * DEV_FOCUS_KEYS.length)];
+    if (alloc.dev > 0) {
+      const marketDevFocusKeys = getDevFocusKeys(market.id);
+      alloc.devFocus = marketDevFocusKeys[Math.floor(Math.random() * marketDevFocusKeys.length)];
+    }
     // ①前Qのpendingをcommit ②今Qの配分をpendingとして積む
     let nOps = commitPendingInvestment(n.ops, nEff, currentMarketNeed);
     nOps = queuePendingInvestment(nOps, alloc, nEff);
@@ -1586,7 +1623,8 @@ const PhaseTag = ({phase}) => (
 // ============================================================
 // BUDGET ALLOCATOR — スライダーUI + 前回値保持
 // ============================================================
-function BudgetAllocator({ availableBudget, allocation, onChange, bs, playerType, ops }) {
+function BudgetAllocator({ availableBudget, allocation, onChange, bs, playerType, ops, marketId }) {
+  const devFocusTypes = getDevFocusTypes(marketId);
   const total = BUDGET_ITEMS.reduce((s,item)=>s+(allocation[item.id]||0),0);
   const remaining = availableBudget - total;
   const pt = PLAYER_TYPES[playerType];
@@ -1693,7 +1731,7 @@ function BudgetAllocator({ availableBudget, allocation, onChange, bs, playerType
                     🎯 どの顧客価値を伸ばす？（市場の反応は来Q判明）
                   </div>
                   <div style={{display:"flex", gap:6}}>
-                    {Object.values(DEV_FOCUS_TYPES).map(f => (
+                    {Object.values(devFocusTypes).map(f => (
                       <button key={f.id}
                         onClick={() => onChange({ ...allocation, devFocus: f.id })}
                         style={{
@@ -2786,6 +2824,39 @@ function TutorialScreen({ onComplete }) {
 }
 
 
+function MarketNewsScreen({ event, quarter, onContinue }) {
+  const sentiment = event.resolvedSentiment || event.sentiment || "neutral";
+  const color = sentiment === "positive" ? C.green : sentiment === "negative" ? C.red : C.muted;
+  const impactIcon = sentiment === "positive" ? "✅" : sentiment === "negative" ? "⚠️" : "ℹ️";
+  const impactText = event.resolvedImpact || event.impact || "";
+
+  return (
+    <div style={bgBase}>
+      <div style={{maxWidth:560, margin:"0 auto", padding:"48px 20px"}}>
+        <div style={{textAlign:"center", marginBottom:28}}>
+          <div style={{fontSize:11,letterSpacing:4,color:C.yellow,marginBottom:8}}>📰 市場ニュース — Q{quarter}</div>
+          <div style={{fontSize:48,marginBottom:12}}>{event.icon}</div>
+          <h2 style={{fontSize:22,fontWeight:900,color:C.text,margin:"0 0 10px"}}>{event.title || event.name}</h2>
+          <p style={{fontSize:13,color:C.muted,lineHeight:1.6}}>{event.desc}</p>
+        </div>
+        <Panel style={{marginBottom:24, border:`1px solid ${color}55`, background:`${color}0d`}}>
+          <Label style={{display:"block",marginBottom:10}}>あなたへの影響</Label>
+          <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+            <span style={{fontSize:22,flexShrink:0}}>{impactIcon}</span>
+            <span style={{fontSize:14,fontWeight:700,color,lineHeight:1.6}}>{impactText}</span>
+          </div>
+        </Panel>
+        <button onClick={onContinue} style={{
+          width:"100%", background:`linear-gradient(135deg,#006080,${C.cyan})`, color:"#fff",
+          border:"none", borderRadius:12, padding:"16px 0", fontSize:15, fontWeight:700, cursor:"pointer",
+        }}>
+          続ける →
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function PriceSettingScreen({ pendingPrice, onConfirm }) {
   const { baseArpu, currentPrice, currentStores, priceSensitivity, isInitial } = pendingPrice;
   const [inputPrice, setInputPrice] = useState(currentPrice || baseArpu);
@@ -3203,8 +3274,8 @@ export default function App() {
     const playerEntries = Object.entries(players);
     const gameStates = room.roomData.gameState;
     // ★ 市場ニーズ（全プレイヤー共通、Firebase経由で同期）。次Qに向けて1回だけ更新する
-    const currentMarketNeed = room.roomData.marketNeed || DEV_FOCUS_KEYS[0];
-    const nextMarketNeed = evolveMarketNeed(currentMarketNeed);
+    const currentMarketNeed = room.roomData.marketNeed || getDevFocusKeys(market.id)[0];
+    const nextMarketNeed = evolveMarketNeed(currentMarketNeed, market.id);
 
     // ★ ③外交：合意成立(accepted)した不戦条約のみtruceMapに反映（双方向）
     const truceMap = {};
@@ -3405,12 +3476,25 @@ export default function App() {
     setPrevOps({...ops});
 
     // ランダムイベント抽選（選択型は別処理）
+    // ★ 市場専用イベントは既存の抽選プールとは別枠で先に抽選する（既存イベントの確率配分に影響を与えないため）
     let ev = null;
-    const roll = Math.random();
-    let cumProb = 0;
-    for (const e of RANDOM_EVENTS) {
-      cumProb += e.prob;
-      if (roll < cumProb) { ev = e; break; }
+    const marketEvents = RANDOM_EVENTS.filter(e => e.marketId === marketId);
+    if (marketEvents.length > 0) {
+      const marketRoll = Math.random();
+      let marketCumProb = 0;
+      for (const e of marketEvents) {
+        marketCumProb += e.prob;
+        if (marketRoll < marketCumProb) { ev = e; break; }
+      }
+    }
+    if (!ev) {
+      const genericEvents = RANDOM_EVENTS.filter(e => !e.marketId);
+      const roll = Math.random();
+      let cumProb = 0;
+      for (const e of genericEvents) {
+        cumProb += e.prob;
+        if (roll < cumProb) { ev = e; break; }
+      }
     }
 
     const { pBs, finalPOps, pl, newNpcs, newUsedSpecials, nextMarketNeed } =
@@ -3467,6 +3551,7 @@ export default function App() {
     // 新イベント自動適用
     let npcDamageTarget = null;
     let npcBoostAll = 0;
+    let dynamicImpact = null; // ★ 条件付きイベントの実際の適用結果（市場ニュース画面の「あなたへの影響」表示用）
     if (ev && ev.type === "auto") {
       // BS効果（仕様変更コスト等）- cashとretainedEarningsを同額変動させてBS整合
       if (ev.bsEffect) {
@@ -3514,7 +3599,46 @@ export default function App() {
         const topScore = Math.max(myScore, ...newNpcs.map(n=>competitiveScore(n.ops, market?.arpu)));
         if (myScore >= topScore) newActiveEffects.push({id:"partnerBonus", type:"acquisitionBonus", value:0.5, remaining:1});
       }
+      // ★ 飲食専用：品質が高い企業への新規獲得ボーナス（あなたのみ対象）
+      if (ev.qualityAcquisitionBonus) {
+        const { threshold, ratio } = ev.qualityAcquisitionBonus;
+        if ((finalOps.solutionQuality || 0) >= threshold) {
+          const bonus = Math.floor((pl.competResult.newFromUnclaimed || 0) * ratio);
+          finalOps = {...finalOps, stores: finalOps.stores + bonus};
+          dynamicImpact = { resolvedImpact: `品質(solutionQuality)が${threshold}以上のため、新規獲得+${bonus}店`, resolvedSentiment: "positive" };
+        } else {
+          dynamicImpact = { resolvedImpact: `品質(solutionQuality)が${threshold}未満のため、今回のあなたへの影響はありません`, resolvedSentiment: "neutral" };
+        }
+      }
+      // ★ 飲食専用：食中毒スキャンダルによる全社の解約率上昇（あなた＋NPC全社）
+      if (ev.allChurnRatio) {
+        finalOps = {...finalOps, stores: Math.floor(finalOps.stores * (1 - ev.allChurnRatio))};
+        dynamicImpact = { resolvedImpact: `解約率+${Math.round(ev.allChurnRatio*100)}%の影響で、あなたの店舗も減少しました`, resolvedSentiment: "negative" };
+      }
+      // ★ 飲食専用：特定devFocusを選んでいた場合の効果ブースト（あなたのみ対象）
+      if (ev.devFocusEffectBoost) {
+        const { focus, ratio } = ev.devFocusEffectBoost;
+        const matched = finalOps.lastDevFocusResult?.focus === focus && (finalOps.lastDevFocusResult.gain || 0) > 0;
+        if (matched) {
+          const extra = Math.floor(finalOps.lastDevFocusResult.gain * ratio);
+          finalOps = {...finalOps, solutionQuality: Math.min(PARAM_MAX, finalOps.solutionQuality + extra)};
+          const focusName = getDevFocusTypes(marketId)[focus]?.name || focus;
+          dynamicImpact = { resolvedImpact: `devFocus「${focusName}」の効果が1.5倍（+${extra}）になりました`, resolvedSentiment: "positive" };
+        } else {
+          dynamicImpact = { resolvedImpact: "該当するdevFocusを選んでいなかったため、今回のあなたへの影響はありません", resolvedSentiment: "neutral" };
+        }
+      }
+      // ★ 飲食専用：価格が標準以上の場合の解約率上乗せ（あなたのみ対象）
+      if (ev.highPriceChurnRatio) {
+        if ((finalOps.priceMultiplier || 1.0) > 1.0) {
+          finalOps = {...finalOps, stores: Math.floor(finalOps.stores * (1 - ev.highPriceChurnRatio))};
+          dynamicImpact = { resolvedImpact: `価格が標準以上のため、解約率+${Math.round(ev.highPriceChurnRatio*100)}%`, resolvedSentiment: "negative" };
+        } else {
+          dynamicImpact = { resolvedImpact: "価格が標準以下のため、今回のあなたへの影響はありません", resolvedSentiment: "neutral" };
+        }
+      }
     }
+    const finalEv = (ev && dynamicImpact) ? {...ev, ...dynamicImpact} : ev;
 
     // NPC更新
     const finalNpcs = newNpcs.map((n, idx) => {
@@ -3525,6 +3649,10 @@ export default function App() {
       if (npcDamageTarget && idx === 0) { // 最初のNPCにダメージ
         if (npcDamageTarget.stores) nOps = {...nOps, stores: Math.floor(nOps.stores*(1-npcDamageTarget.stores))};
         if (npcDamageTarget.brandAwareness) nOps = {...nOps, brandAwareness: Math.max(0,(nOps.brandAwareness||0)-npcDamageTarget.brandAwareness)};
+      }
+      // ★ 飲食専用：食中毒スキャンダルは全社（NPC含む）に解約率上昇が及ぶ
+      if (ev?.allChurnRatio) {
+        nOps = {...nOps, stores: Math.floor(nOps.stores * (1 - ev.allChurnRatio))};
       }
       return {...n, ops: nOps};
     });
@@ -3538,7 +3666,7 @@ export default function App() {
       setHistory(h=>[...h,{quarter,netWorth:equity(finalBs),stores:Math.floor(finalOps.stores)||0,netIncome:pl.netIncome,phase:getPhase(quarter).name,npcSnapshot:finalNpcs.map(n=>({id:n.id,name:n.name,color:n.color,stores:Math.floor(n.ops.stores)||0,netWorth:equity(n.bs)}))}]);
       setPrevNpcOps(Object.fromEntries(finalNpcs.map(n=>[n.id,{...n.ops}])));
       setBs(finalBs); setOps(finalOps); setNpcs(finalNpcs);
-      setUsedSpecials(newUsedSpecials); setLastPL({...pl,competResult:enrichedResult2}); setLastEvent(ev);
+      setUsedSpecials(newUsedSpecials); setLastPL({...pl,competResult:enrichedResult2}); setLastEvent(finalEv);
       setLastNetIncome(pl.netIncome); setNarratives(newNarratives2);
       setActiveEffects(newActiveEffects);
       setPrevAllocation(allocation); setAllocation({...allocation}); setSpecialAction(null);
@@ -3556,12 +3684,22 @@ export default function App() {
     setHistory(h=>[...h,{quarter,netWorth:equity(finalBs),stores:Math.floor(finalOps.stores)||0,netIncome:pl.netIncome,phase:getPhase(quarter).name,npcSnapshot:finalNpcs.map(n=>({id:n.id,name:n.name,color:n.color,stores:Math.floor(n.ops.stores)||0,netWorth:equity(n.bs)}))}]);
     setPrevNpcOps(Object.fromEntries(finalNpcs.map(n=>[n.id,{...n.ops}])));
     setBs(finalBs); setOps(finalOps); setNpcs(finalNpcs);
-    setUsedSpecials(newUsedSpecials); setLastPL({...pl,competResult:enrichedResult}); setLastEvent(ev);
+    setUsedSpecials(newUsedSpecials); setLastPL({...pl,competResult:enrichedResult}); setLastEvent(finalEv);
     setLastNetIncome(pl.netIncome); setNarratives(newNarratives);
     setActiveEffects(newActiveEffects);
     setPrevAllocation(allocation); setAllocation({...allocation}); setSpecialAction(null);
     setInvestTarget(null); setBorrowedThisQuarter(0); // Stage2/3: 次Qはリセット
-    goToResultOrForecast(pl);
+    // ★ 自動適用イベントが発生していた場合は、battlefieldシーンの前に「市場ニュース」画面を挟む
+    if (ev && ev.type === "auto") {
+      setScreen("eventnews");
+    } else {
+      goToResultOrForecast(pl);
+    }
+  }
+
+  // 市場ニュース画面から続ける
+  function continueFromEventNews() {
+    goToResultOrForecast(lastPL);
   }
 
   // 選択型イベントの確定
@@ -3826,6 +3964,11 @@ export default function App() {
     );
   }
 
+  // MARKET NEWS SCREEN（自動適用イベント発生時、battlefieldの前に挟む）
+  if (screen === "eventnews" && lastEvent) {
+    return <MarketNewsScreen event={lastEvent} quarter={quarter} onContinue={continueFromEventNews} />;
+  }
+
   // PRICE SETTING SCREEN（年次レビュー後）
   if (screen === "pricesetting" && pendingPrice) {
     return <PriceSettingScreen pendingPrice={pendingPrice} onConfirm={confirmPrice} />;
@@ -4064,15 +4207,7 @@ export default function App() {
             <h2 style={{fontSize:22,fontWeight:900,color:C.text,margin:"0 0 8px"}}>Year {yr} Q{qq} — 決算</h2>
             <PhaseTag phase={phase}/>
           </div>
-          {lastEvent && (
-            <div style={{background:`${C.yellow}10`,border:`1px solid ${C.yellow}33`,borderRadius:10,padding:"12px 16px",marginBottom:14,display:"flex",gap:12,alignItems:"flex-start"}}>
-              <span style={{fontSize:26}}>{lastEvent.icon}</span>
-              <div>
-                <div style={{fontSize:13,fontWeight:700,color:C.yellow}}>{lastEvent.name}</div>
-                <div style={{fontSize:11,color:C.muted,marginTop:2}}>{lastEvent.desc}</div>
-              </div>
-            </div>
-          )}
+          {/* ★ イベント発生時は「市場ニュース」画面(eventnews)で既に表示済みのため、ここでは重複表示しない */}
 
           {/* ① 原因：前Q投資の反映 */}
           {prevOps && (() => {
@@ -4106,8 +4241,9 @@ export default function App() {
                 {/* ★ devFocusの当たり/外れ判定（市場ニーズは事後にだけ開示） */}
                 {ops.lastDevFocusResult && (() => {
                   const r = ops.lastDevFocusResult;
-                  const chosen = DEV_FOCUS_TYPES[r.focus];
-                  const actual = DEV_FOCUS_TYPES[r.marketNeed];
+                  const marketDevFocusTypes = getDevFocusTypes(marketId);
+                  const chosen = marketDevFocusTypes[r.focus];
+                  const actual = marketDevFocusTypes[r.marketNeed];
                   return (
                     <div style={{
                       marginTop: changes.length > 0 ? 10 : 0, paddingTop: changes.length > 0 ? 10 : 0,
@@ -4500,7 +4636,7 @@ export default function App() {
               <div style={{marginBottom:12,padding:"8px 12px",background:C.bg,borderRadius:8,fontSize:11,color:C.muted,lineHeight:1.6}}>
                 💡 未投資の項目は毎Q自動で劣化します。すべてに配分する予算はありません。何を伸ばし、何を犠牲にするか。
               </div>
-              <BudgetAllocator availableBudget={availableBudget} allocation={allocation} onChange={setAllocation} bs={bs} playerType={playerType} ops={ops}/>
+              <BudgetAllocator availableBudget={availableBudget} allocation={allocation} onChange={setAllocation} bs={bs} playerType={playerType} ops={ops} marketId={marketId}/>
             </Panel>
             <Panel style={{marginBottom:14,padding:"12px 16px"}}>
               <Label style={{display:"block",marginBottom:8}}>このQの予測変化（投資 or 劣化）</Label>

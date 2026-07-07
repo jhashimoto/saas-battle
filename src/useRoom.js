@@ -5,8 +5,12 @@ import { ref, set, get, update, onValue, off, serverTimestamp } from "firebase/d
 const GAME_VERSION = "6.2";
 const STORAGE_KEY = `saas_battle_room_v${GAME_VERSION}`;
 const TUTORIAL_KEY = `saas_tutorial_done_v${GAME_VERSION}`;
-// ★ App.jsx側のDEV_FOCUS_TYPESと同じキー一覧（市場ニーズの初期化に使用。循環import回避のためここに複製）
-const DEV_FOCUS_KEYS_FOR_ROOM = ["efficiency", "uiux", "reliability"];
+// ★ App.jsx側のDEV_FOCUS_TYPES(_FOOD)と同じキー一覧（市場ニーズの初期化に使用。循環import回避のためここに複製）
+const DEV_FOCUS_KEYS_FOR_ROOM_DEFAULT = ["efficiency", "uiux", "reliability"];
+const DEV_FOCUS_KEYS_FOR_ROOM_FOOD = ["order_speed", "menu_ui", "payment_hygiene"];
+function devFocusKeysForRoom(marketId) {
+  return marketId === "food" ? DEV_FOCUS_KEYS_FOR_ROOM_FOOD : DEV_FOCUS_KEYS_FOR_ROOM_DEFAULT;
+}
 
 function clearOldVersionCache() {
   try {
@@ -107,10 +111,11 @@ export function useRoom() {
 
   const startGame = useCallback(async (initialStates) => {
     if (!isHost || !roomCode) return;
-    // ★ 市場ニーズ（全員共通、非公開）の初期値をランダムに設定
-    const initialMarketNeed = DEV_FOCUS_KEYS_FOR_ROOM[Math.floor(Math.random() * DEV_FOCUS_KEYS_FOR_ROOM.length)];
+    // ★ 市場ニーズ（全員共通、非公開）の初期値をランダムに設定（市場ごとのdevFocusキー一覧から選ぶ）
+    const keys = devFocusKeysForRoom(roomData?.marketId);
+    const initialMarketNeed = keys[Math.floor(Math.random() * keys.length)];
     await update(ref(db, `rooms/${roomCode}`), { status: "playing", quarter: 1, gameState: initialStates, marketNeed: initialMarketNeed });
-  }, [isHost, roomCode]);
+  }, [isHost, roomCode, roomData]);
 
   const submitAllocation = useCallback(async (allocation, specialAction) => {
     if (!roomCode || !playerId) return;
