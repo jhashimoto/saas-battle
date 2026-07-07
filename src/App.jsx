@@ -1294,6 +1294,26 @@ function CharacterSprite({ type, mood = "normal", scale = 1 }) {
   );
 }
 
+// ★ オンライン対戦時は、ドット絵キャラの代わりにLINEプロフィールアイコンを表示する
+// （pictureUrlが無い＝LINE外ブラウザや未ログイン時はドット絵にフォールバック）
+function PlayerAvatar({ online, pictureUrl, type, mood, scale, svgWidth, svgHeight, viewBox, imgSize }) {
+  if (online && pictureUrl) {
+    const moodBadge = mood === "happy" ? "😊" : mood === "worried" ? "😟" : null;
+    return (
+      <div style={{position:"relative", width:imgSize, height:imgSize, margin:"0 auto"}}>
+        <img src={pictureUrl} alt="" style={{
+          width:imgSize, height:imgSize, borderRadius:"50%", objectFit:"cover", display:"block",
+          border:`2px solid ${C.panel}`, boxShadow:"0 2px 6px rgba(0,0,0,0.4)",
+        }}/>
+        {moodBadge && (
+          <span style={{position:"absolute", bottom:-4, right:-4, fontSize:14, lineHeight:1}}>{moodBadge}</span>
+        )}
+      </div>
+    );
+  }
+  return <svg width={svgWidth} height={svgHeight} viewBox={viewBox}><CharacterSprite type={type} mood={mood} scale={scale}/></svg>;
+}
+
 // ============================================================
 // BATTLE BOARD SCENE：陣取り合戦・専用フルスクリーンシーン
 // 1本の横長バーを[NPC1陣地][あなた陣地][NPC2陣地][未開拓]の順に分割し、
@@ -1301,7 +1321,7 @@ function CharacterSprite({ type, mood = "normal", scale = 1 }) {
 // 陣地が伸び縮みするとキャラの立ち位置も連動して動くため、
 // 「押し込んでいる/押し込まれている」が直感的に伝わる。
 // ============================================================
-function BattleBoardScene({ npcs, prevPlayerStores, finalPlayerStores, competResult, market, quarter, onContinue }) {
+function BattleBoardScene({ npcs, prevPlayerStores, finalPlayerStores, competResult, market, quarter, onlineMode, onContinue }) {
   const cr = competResult || {};
   const BAND_COLORS = { player:"#00C8D4", npc1:"#E24B4A", npc2:"#3FB950", none:"#30363D" };
 
@@ -1399,7 +1419,7 @@ function BattleBoardScene({ npcs, prevPlayerStores, finalPlayerStores, competRes
             position:"absolute", top:-58, left:`${npc1End}%`, transform:"translateX(-50%)",
             transition:"left 0.8s cubic-bezier(0.22,1,0.36,1)", textAlign:"center", zIndex:3,
           }}>
-            <svg width="50" height="58" viewBox="-40 -68 80 88"><CharacterSprite type="npc1" mood={npc1Mood} scale={0.68}/></svg>
+            <PlayerAvatar online={onlineMode} pictureUrl={npc1?.pictureUrl} type="npc1" mood={npc1Mood} scale={0.68} svgWidth={50} svgHeight={58} viewBox="-40 -68 80 88" imgSize={50}/>
             <div style={{fontSize:9, color:BAND_COLORS.npc1, fontWeight:700, whiteSpace:"nowrap"}}>{npc1?.name||"競合1"}</div>
           </div>
 
@@ -1408,7 +1428,7 @@ function BattleBoardScene({ npcs, prevPlayerStores, finalPlayerStores, competRes
             position:"absolute", top:-72, left:`${playerEnd}%`, transform:"translateX(-50%)",
             transition:"left 0.8s cubic-bezier(0.22,1,0.36,1)", textAlign:"center", zIndex:4,
           }}>
-            <svg width="62" height="72" viewBox="-45 -75 90 95"><CharacterSprite type="player" mood={playerMood} scale={0.88}/></svg>
+            <PlayerAvatar online={onlineMode} pictureUrl={lineProfile?.pictureUrl} type="player" mood={playerMood} scale={0.88} svgWidth={62} svgHeight={72} viewBox="-45 -75 90 95" imgSize={62}/>
             <div style={{fontSize:10, color:BAND_COLORS.player, fontWeight:700, whiteSpace:"nowrap"}}>あなた</div>
           </div>
 
@@ -1417,7 +1437,7 @@ function BattleBoardScene({ npcs, prevPlayerStores, finalPlayerStores, competRes
             position:"absolute", top:-58, left:`${npc2End}%`, transform:"translateX(-50%)",
             transition:"left 0.8s cubic-bezier(0.22,1,0.36,1)", textAlign:"center", zIndex:3,
           }}>
-            <svg width="46" height="54" viewBox="-30 -55 60 75"><CharacterSprite type="npc2" mood={npc2Mood} scale={0.62}/></svg>
+            <PlayerAvatar online={onlineMode} pictureUrl={npc2?.pictureUrl} type="npc2" mood={npc2Mood} scale={0.62} svgWidth={46} svgHeight={54} viewBox="-30 -55 60 75" imgSize={46}/>
             <div style={{fontSize:9, color:BAND_COLORS.npc2, fontWeight:700, whiteSpace:"nowrap"}}>{npc2?.name||"競合2"}</div>
           </div>
 
@@ -3279,6 +3299,7 @@ export default function App() {
             id: pid, name: p.name,
             type: p.playerType,
             icon: PLAYER_TYPES[p.playerType]?.icon || "👤",
+            pictureUrl: p.pictureUrl || null,
             color: ["#FF6B6B","#4ECDC4","#FFE66D"][Object.keys(rd.players).indexOf(pid) % 3],
             strategy: "sales_heavy",
             bs: state?.bs || {...PLAYER_TYPES[p.playerType]?.bs},
@@ -4052,6 +4073,7 @@ export default function App() {
               name: p.name,
               type: p.playerType,
               icon: PLAYER_TYPES[p.playerType]?.icon || "👤",
+              pictureUrl: p.pictureUrl || null,
               color: ["#FF6B6B","#4ECDC4","#FFE66D"][Object.keys(info.allPlayers).indexOf(pid) % 3],
               strategy: "sales_heavy",
               bs: {...PLAYER_TYPES[p.playerType]?.bs},
@@ -4346,6 +4368,7 @@ export default function App() {
         competResult={cr}
         market={market}
         quarter={quarter}
+        onlineMode={onlineMode}
         onContinue={() => setScreen("result")}
       />
     );

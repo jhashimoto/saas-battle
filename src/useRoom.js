@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { db } from "./firebase.js";
 import { ref, set, get, update, onValue, off, serverTimestamp } from "firebase/database";
+import { lineProfile } from "./liff.js";
 
 const GAME_VERSION = "6.2";
 const STORAGE_KEY = `saas_battle_room_v${GAME_VERSION}`;
@@ -88,7 +89,7 @@ export function useRoom() {
       await set(ref(db, `rooms/${code}`), {
         host: pid, status: "waiting", marketId, quarter: 1, version: GAME_VERSION,
         createdAt: serverTimestamp(),
-        players: { [pid]: { name: playerName, playerType, ready: false, isHost: true, joinedAt: serverTimestamp() } }
+        players: { [pid]: { name: playerName, playerType, ready: false, isHost: true, joinedAt: serverTimestamp(), pictureUrl: lineProfile?.pictureUrl || null } }
       });
       setRoomCode(code); setPlayerId(pid); setIsHost(true);
       saveRoomToStorage(code, pid, true);
@@ -107,7 +108,7 @@ export function useRoom() {
       const players = room.players || {};
       if (Object.keys(players).length >= 3) { setError("ルームが満員です（最大3人）"); setLoading(false); return; }
       const pid = `p_${Date.now()}`;
-      await update(ref(db, `rooms/${code}/players/${pid}`), { name: playerName, playerType, ready: false, isHost: false, joinedAt: serverTimestamp() });
+      await update(ref(db, `rooms/${code}/players/${pid}`), { name: playerName, playerType, ready: false, isHost: false, joinedAt: serverTimestamp(), pictureUrl: lineProfile?.pictureUrl || null });
       setRoomCode(code); setPlayerId(pid); setIsHost(false);
       saveRoomToStorage(code, pid, false);
     } catch(e) { setError("参加に失敗しました: " + e.message); }
