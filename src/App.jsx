@@ -1393,6 +1393,24 @@ function BattleBoardScene({ npcs, prevPlayerStores, finalPlayerStores, competRes
   const playerEnd = w.npc1 + w.player;
   const npc2End = w.npc1 + w.player + w.npc2;
 
+  // ★ 店舗数が近いとキャラアイコン同士が重なって見えるため、キャラの表示位置だけ
+  // 最低間隔を確保してずらす（バーの幅=陣地の実際の割合はw.*のまま変えない）
+  const CHAR_MIN_GAP = 12;
+  const [dispNpc1End, dispPlayerEnd, dispNpc2End] = (() => {
+    const pos = [npc1End, playerEnd, npc2End];
+    for (let i = 1; i < pos.length; i++) {
+      if (pos[i] - pos[i - 1] < CHAR_MIN_GAP) pos[i] = pos[i - 1] + CHAR_MIN_GAP;
+    }
+    if (pos[pos.length - 1] > 100) {
+      pos[pos.length - 1] = 100;
+      for (let i = pos.length - 2; i >= 0; i--) {
+        if (pos[i + 1] - pos[i] < CHAR_MIN_GAP) pos[i] = pos[i + 1] - CHAR_MIN_GAP;
+      }
+    }
+    if (pos[0] < 0) pos[0] = 0;
+    return pos;
+  })();
+
   const barHeight = 56;
 
   return (
@@ -1416,7 +1434,7 @@ function BattleBoardScene({ npcs, prevPlayerStores, finalPlayerStores, competRes
 
           {/* NPC1キャラ：NPC1陣地の右端（あなたとの境界）に立つ */}
           <div style={{
-            position:"absolute", top:-58, left:`${npc1End}%`, transform:"translateX(-50%)",
+            position:"absolute", top:-58, left:`${dispNpc1End}%`, transform:"translateX(-50%)",
             transition:"left 0.8s cubic-bezier(0.22,1,0.36,1)", textAlign:"center", zIndex:3,
           }}>
             <PlayerAvatar online={onlineMode} pictureUrl={npc1?.pictureUrl} type="npc1" mood={npc1Mood} scale={0.68} svgWidth={50} svgHeight={58} viewBox="-40 -68 80 88" imgSize={50}/>
@@ -1425,7 +1443,7 @@ function BattleBoardScene({ npcs, prevPlayerStores, finalPlayerStores, competRes
 
           {/* あなたキャラ：あなた陣地の右端（NPC2との境界）に立つ */}
           <div style={{
-            position:"absolute", top:-72, left:`${playerEnd}%`, transform:"translateX(-50%)",
+            position:"absolute", top:-72, left:`${dispPlayerEnd}%`, transform:"translateX(-50%)",
             transition:"left 0.8s cubic-bezier(0.22,1,0.36,1)", textAlign:"center", zIndex:4,
           }}>
             <PlayerAvatar online={onlineMode} pictureUrl={lineProfile?.pictureUrl} type="player" mood={playerMood} scale={0.88} svgWidth={62} svgHeight={72} viewBox="-45 -75 90 95" imgSize={62}/>
@@ -1434,7 +1452,7 @@ function BattleBoardScene({ npcs, prevPlayerStores, finalPlayerStores, competRes
 
           {/* NPC2キャラ：NPC2陣地の右端（未開拓との境界）に立つ */}
           <div style={{
-            position:"absolute", top:-58, left:`${npc2End}%`, transform:"translateX(-50%)",
+            position:"absolute", top:-58, left:`${dispNpc2End}%`, transform:"translateX(-50%)",
             transition:"left 0.8s cubic-bezier(0.22,1,0.36,1)", textAlign:"center", zIndex:3,
           }}>
             <PlayerAvatar online={onlineMode} pictureUrl={npc2?.pictureUrl} type="npc2" mood={npc2Mood} scale={0.62} svgWidth={46} svgHeight={54} viewBox="-30 -55 60 75" imgSize={46}/>
